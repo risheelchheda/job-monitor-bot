@@ -333,17 +333,26 @@ def build_email_html(job, cover_letter=None):
 
 
 def send_email_brevo(job, html, subject):
-    """Send via Brevo HTTP API — works on Railway (pure HTTPS, no SMTP port)."""
+    """Send via Brevo HTTP API — works on Railway (pure HTTPS, no SMTP port).
+
+    Gmail addresses cannot be used as Brevo senders due to Gmail's DMARC policy.
+    We use Brevo's own verified domain (no-reply@brevo-mail.io) as the sender,
+    while still delivering to your Gmail inbox (EMAIL_TO).
+    """
     api_key = CONFIG.get("BREVO_API_KEY", "").strip()
     to      = CONFIG.get("EMAIL_TO", "").strip()
-    sender  = CONFIG.get("EMAIL_USER", "").strip()
 
     if not api_key:
         print("  [Brevo]  ⚠️  BREVO_API_KEY not set in Railway Variables")
         return False
-    if not to or not sender:
-        print("  [Brevo]  ⚠️  EMAIL_TO or EMAIL_USER not set")
+    if not to:
+        print("  [Brevo]  ⚠️  EMAIL_TO not set")
         return False
+
+    # Gmail/Yahoo/freemail domains are blocked by DMARC when used as Brevo sender.
+    # Use Brevo's own safe sender domain instead. You still RECEIVE at your Gmail.
+    safe_sender_email = "no-reply@brevo-mail.io"
+    safe_sender_name  = "Job Monitor Bot"
 
     try:
         resp = requests.post(
@@ -353,7 +362,7 @@ def send_email_brevo(job, html, subject):
                 "Content-Type": "application/json",
             },
             json={
-                "sender":      {"name": "Job Monitor Bot", "email": sender},
+                "sender":      {"name": safe_sender_name, "email": safe_sender_email},
                 "to":          [{"email": to}],
                 "subject":     subject,
                 "htmlContent": html,
@@ -363,7 +372,6 @@ def send_email_brevo(job, html, subject):
         if resp.status_code in (200, 201):
             return True
         else:
-            # Print full error so we can see what went wrong
             print(f"  [Brevo]  ❌ HTTP {resp.status_code}: {resp.text[:200]}")
             return False
     except Exception as e:
