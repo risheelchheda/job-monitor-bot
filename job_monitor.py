@@ -257,16 +257,9 @@ PORTAL_COLORS = {
     "Foundit":  "#6C47FF",
 }
 
-def send_email(job, cover_letter=None):
-    user  = CONFIG.get("EMAIL_USER","").strip()
-    pwd   = CONFIG.get("EMAIL_PASS","").strip()
-    to    = CONFIG.get("EMAIL_TO","").strip()
-    if not user or not pwd or not to:
-        print("  [Email] Not configured — skipping")
-        return
-
+def build_email_html(job, cover_letter=None):
+    """Build the HTML body for the job alert email."""
     color = PORTAL_COLORS.get(job["portal"], "#6366f1")
-    subject = f"⚡ New Job: {job['title']} at {job['company']} [{job['portal']}]"
 
     cover_html = ""
     if cover_letter:
@@ -283,24 +276,19 @@ def send_email(job, cover_letter=None):
           </p>
         </div>"""
 
-    html = f"""
+    return f"""
     <!DOCTYPE html>
     <html>
     <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
       <div style="max-width:580px;margin:30px auto;background:#fff;
                   border-radius:12px;overflow:hidden;
                   box-shadow:0 2px 12px rgba(0,0,0,0.08)">
-
-        <!-- Header -->
         <div style="background:{color};padding:24px 28px">
           <p style="margin:0;color:rgba(255,255,255,0.8);font-size:13px">Job Monitor Bot</p>
           <h1 style="margin:4px 0 0;color:#fff;font-size:22px">🚨 New Job Alert!</h1>
         </div>
-
-        <!-- Body -->
         <div style="padding:24px 28px">
-          <div style="background:#fafafa;border:1px solid #eee;
-                      border-radius:10px;padding:20px">
+          <div style="background:#fafafa;border:1px solid #eee;border-radius:10px;padding:20px">
             <h2 style="margin:0 0 12px;color:#1a1a2e;font-size:20px">{job['title']}</h2>
             <table style="border-collapse:collapse;width:100%">
               <tr>
@@ -314,9 +302,8 @@ def send_email(job, cover_letter=None):
               <tr>
                 <td style="padding:5px 0;color:#888;font-size:13px">🌐 Portal</td>
                 <td style="padding:5px 0">
-                  <span style="background:{color}20;color:{color};
-                               padding:2px 10px;border-radius:20px;
-                               font-size:12px;font-weight:700">{job['portal']}</span>
+                  <span style="background:{color}20;color:{color};padding:2px 10px;
+                               border-radius:20px;font-size:12px;font-weight:700">{job['portal']}</span>
                 </td>
               </tr>
               <tr>
@@ -327,28 +314,57 @@ def send_email(job, cover_letter=None):
               </tr>
             </table>
           </div>
-
           <a href="{job['url']}"
-             style="display:block;text-align:center;margin:20px 0 0;
-                    padding:14px;background:{color};color:#fff;
-                    text-decoration:none;border-radius:8px;
+             style="display:block;text-align:center;margin:20px 0 0;padding:14px;
+                    background:{color};color:#fff;text-decoration:none;border-radius:8px;
                     font-weight:700;font-size:16px;letter-spacing:0.3px">
             ⚡ Apply Now — Be Among the First!
           </a>
-
           {cover_html}
         </div>
-
-        <!-- Footer -->
         <div style="background:#f9f9f9;padding:14px 28px;border-top:1px solid #eee">
           <p style="margin:0;color:#aaa;font-size:11px;text-align:center">
-            Sent by your Job Monitor Bot •
-            Apply ASAP — early applicants get 3× more callbacks
+            Sent by your Job Monitor Bot • Apply ASAP — early applicants get 3× more callbacks
           </p>
         </div>
       </div>
     </body>
     </html>"""
+
+
+def send_email_brevo(job, html, subject):
+    """Send via Brevo HTTP API — works on Railway (no SMTP port needed)."""
+    api_key = CONFIG.get("BREVO_API_KEY", "").strip()
+    to      = CONFIG.get("EMAIL_TO", "").strip()
+    sender  = CONFIG.get("EMAIL_USER", "risheelchheda19@gmail.com").strip()
+
+    if not api_key or not to:
+        return False
+
+    resp = requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={
+            "api-key":      api_key,
+            "Content-Type": "application/json",
+        },
+        json={
+            "sender":      {"name": "Job Monitor Bot", "email": sender},
+            "to":          [{"email": to}],
+            "subject":     subject,
+            "htmlContent": html,
+        },
+        timeout=15,
+    )
+    return resp.status_code in (200, 201)
+
+
+def send_email_smtp(job, html, subject):
+    """Send via Gmail SMTP — works on local machine."""
+    user = CONFIG.get("EMAIL_USER", "").strip()
+    pwd  = CONFIG.get("EMAIL_PASS", "").strip()
+    to   = CONFIG.get("EMAIL_TO",   "").strip()
+    if not user or not pwd or not to:
+        return False
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -356,13 +372,44 @@ def send_email(job, cover_letter=None):
     msg["To"]      = to
     msg.attach(MIMEText(html, "html"))
 
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(user, pwd)
+        s.sendmail(user, to, msg.as_string())
+    return True
+
+
+def send_email(job, cover_letter=None):
+    """
+    Try Brevo HTTP API first (works on Railway).
+    Fall back to Gmail SMTP (works locally).
+    """
+    to = CONFIG.get("EMAIL_TO", "").strip()
+    if not to:
+        print("  [Email] Not configured — skipping")
+        return
+
+    subject = f"⚡ New Job: {job['title']} at {job['company']} [{job['portal']}]"
+    html    = build_email_html(job, cover_letter)
+
+    # ── Try Brevo first ──────────────────────────────────────
+    if CONFIG.get("BREVO_API_KEY", "").strip():
+        try:
+            if send_email_brevo(job, html, subject):
+                print(f"  [Email] ✅ Sent (Brevo) → {job['title']} @ {job['company']}")
+                return
+            else:
+                print("  [Email] ⚠️  Brevo failed — trying SMTP fallback")
+        except Exception as e:
+            print(f"  [Email] ⚠️  Brevo error: {e} — trying SMTP fallback")
+
+    # ── Fall back to Gmail SMTP ───────────────────────────────
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-            s.login(user, pwd)
-            s.sendmail(user, to, msg.as_string())
-        print(f"  [Email] ✅ Sent → {job['title']} @ {job['company']}")
+        if send_email_smtp(job, html, subject):
+            print(f"  [Email] ✅ Sent (SMTP) → {job['title']} @ {job['company']}")
+        else:
+            print("  [Email] ⚠️  SMTP not configured")
     except Exception as e:
-        print(f"  [Email] ❌ Error: {e}")
+        print(f"  [Email] ❌ SMTP Error: {e}")
 
 # ─────────────────────────────────────────
 #  MAIN LOOP

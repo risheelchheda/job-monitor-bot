@@ -42,10 +42,18 @@ CONFIG = {
     # ─────────────────────────────────────
     # 📧 EMAIL  ← reads from Railway env vars
     # ─────────────────────────────────────
+    # Brevo is used on Railway (HTTP, no port blocking)
+    # Gmail SMTP is used as fallback on local machine
+    #
+    # BREVO SETUP (free, 300 emails/day):
+    # 1. Sign up free at brevo.com
+    # 2. Go to Settings → SMTP & API → API Keys → Generate
+    # 3. Add to Railway Variables as BREVO_API_KEY
 
-    "EMAIL_USER": os.environ.get("EMAIL_USER", ""),
+    "EMAIL_USER": os.environ.get("EMAIL_USER", "risheelchheda19@gmail.com"),
     "EMAIL_PASS": os.environ.get("EMAIL_PASS", ""),
-    "EMAIL_TO":   os.environ.get("EMAIL_TO",   ""),
+    "EMAIL_TO": os.environ.get("EMAIL_TO", "risheelchheda19@gmail.com"),
+    "BREVO_API_KEY": os.environ.get("BREVO_API_KEY", ""),
 
     # ─────────────────────────────────────
     # 🤖 OLLAMA — disabled on cloud
@@ -53,21 +61,21 @@ CONFIG = {
     # cover letters are simply skipped.
     # ─────────────────────────────────────
 
-    "OLLAMA_URL":             "http://localhost:11434",
-    "OLLAMA_MODEL":           "llama3.2",
-    "GENERATE_COVER_LETTERS": False,   # ← must be False on cloud
+    "OLLAMA_URL": "http://localhost:11434",
+    "OLLAMA_MODEL": "llama3.2",
+    "GENERATE_COVER_LETTERS": False,  # ← must be False on cloud
 
     # ─────────────────────────────────────
     # 👤 YOUR PROFILE
     # ─────────────────────────────────────
 
     "USER_PROFILE": {
-        "name":             "Risheel Chheda",
-        "current_company":  "NPCI (National Payments Corporation of India)",
-        "current_role":     "Software Developer",
-        "target_role":      "Software Developer / Backend Engineer",
+        "name": "Risheel Chheda",
+        "current_company": "NPCI (National Payments Corporation of India)",
+        "current_role": "Software Developer",
+        "target_role": "Software Developer / Backend Engineer",
         "experience_years": 1.5,
-        "education":        "B.Tech Electronics Engineering, VJTI Mumbai (CPI: 8.8/10)",
+        "education": "B.Tech Electronics Engineering, VJTI Mumbai (CPI: 8.8/10)",
         "skills": [
             "Java", "Python", "JavaScript", "SQL", "C++",
             "Spring Boot", "Spring MVC", "Spring AI", "REST APIs",
