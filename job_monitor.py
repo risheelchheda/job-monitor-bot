@@ -333,33 +333,50 @@ def build_email_html(job, cover_letter=None):
 
 
 def send_email_brevo(job, html, subject):
-    """Send via Brevo HTTP API — works on Railway (no SMTP port needed)."""
+    """Send via Brevo HTTP API — works on Railway (pure HTTPS, no SMTP port)."""
     api_key = CONFIG.get("BREVO_API_KEY", "").strip()
     to      = CONFIG.get("EMAIL_TO", "").strip()
-    sender  = CONFIG.get("EMAIL_USER", "risheelchheda19@gmail.com").strip()
+    sender  = CONFIG.get("EMAIL_USER", "").strip()
 
-    if not api_key or not to:
+    if not api_key:
+        print("  [Brevo]  ⚠️  BREVO_API_KEY not set in Railway Variables")
+        return False
+    if not to or not sender:
+        print("  [Brevo]  ⚠️  EMAIL_TO or EMAIL_USER not set")
         return False
 
-    resp = requests.post(
-        "https://api.brevo.com/v3/smtp/email",
-        headers={
-            "api-key":      api_key,
-            "Content-Type": "application/json",
-        },
-        json={
-            "sender":      {"name": "Job Monitor Bot", "email": sender},
-            "to":          [{"email": to}],
-            "subject":     subject,
-            "htmlContent": html,
-        },
-        timeout=15,
-    )
-    return resp.status_code in (200, 201)
+    try:
+        resp = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "api-key":      api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "sender":      {"name": "Job Monitor Bot", "email": sender},
+                "to":          [{"email": to}],
+                "subject":     subject,
+                "htmlContent": html,
+            },
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            return True
+        else:
+            # Print full error so we can see what went wrong
+            print(f"  [Brevo]  ❌ HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
+    except Exception as e:
+        print(f"  [Brevo]  ❌ Request error: {e}")
+        return False
 
 
 def send_email_smtp(job, html, subject):
-    """Send via Gmail SMTP — works on local machine."""
+    """
+    Send via Gmail SMTP.
+    Tries port 587 (STARTTLS) first — Railway allows this.
+    Falls back to port 465 (SSL) for local use.
+    """
     user = CONFIG.get("EMAIL_USER", "").strip()
     pwd  = CONFIG.get("EMAIL_PASS", "").strip()
     to   = CONFIG.get("EMAIL_TO",   "").strip()
@@ -372,16 +389,34 @@ def send_email_smtp(job, html, subject):
     msg["To"]      = to
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(user, pwd)
-        s.sendmail(user, to, msg.as_string())
-    return True
+    # Try port 587 (STARTTLS) — works on most cloud platforms
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(user, pwd)
+            s.sendmail(user, to, msg.as_string())
+        return True
+    except Exception as e587:
+        print(f"  [SMTP]   ⚠️  Port 587 failed: {e587} — trying port 465")
+
+    # Fall back to port 465 (SSL) — works locally
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as s:
+            s.login(user, pwd)
+            s.sendmail(user, to, msg.as_string())
+        return True
+    except Exception as e465:
+        print(f"  [SMTP]   ❌ Port 465 also failed: {e465}")
+        return False
 
 
 def send_email(job, cover_letter=None):
     """
-    Try Brevo HTTP API first (works on Railway).
-    Fall back to Gmail SMTP (works locally).
+    Send job alert email.
+    Priority: Brevo API → Gmail SMTP port 587 → Gmail SMTP port 465
+    Brevo works on Railway; SMTP works locally.
     """
     to = CONFIG.get("EMAIL_TO", "").strip()
     if not to:
@@ -390,26 +425,23 @@ def send_email(job, cover_letter=None):
 
     subject = f"⚡ New Job: {job['title']} at {job['company']} [{job['portal']}]"
     html    = build_email_html(job, cover_letter)
+    label   = f"{job['title']} @ {job['company']}"
 
-    # ── Try Brevo first ──────────────────────────────────────
+    # 1. Try Brevo (best for Railway)
     if CONFIG.get("BREVO_API_KEY", "").strip():
-        try:
-            if send_email_brevo(job, html, subject):
-                print(f"  [Email] ✅ Sent (Brevo) → {job['title']} @ {job['company']}")
-                return
-            else:
-                print("  [Email] ⚠️  Brevo failed — trying SMTP fallback")
-        except Exception as e:
-            print(f"  [Email] ⚠️  Brevo error: {e} — trying SMTP fallback")
+        if send_email_brevo(job, html, subject):
+            print(f"  [Email] ✅ Sent (Brevo) → {label}")
+            return
+        print("  [Email] Brevo failed — trying SMTP...")
 
-    # ── Fall back to Gmail SMTP ───────────────────────────────
-    try:
+    # 2. Try Gmail SMTP (ports 587 then 465)
+    if CONFIG.get("EMAIL_PASS", "").strip():
         if send_email_smtp(job, html, subject):
-            print(f"  [Email] ✅ Sent (SMTP) → {job['title']} @ {job['company']}")
+            print(f"  [Email] ✅ Sent (SMTP) → {label}")
         else:
-            print("  [Email] ⚠️  SMTP not configured")
-    except Exception as e:
-        print(f"  [Email] ❌ SMTP Error: {e}")
+            print(f"  [Email] ❌ All methods failed for: {label}")
+    else:
+        print("  [Email] ❌ EMAIL_PASS not set — cannot send via SMTP")
 
 # ─────────────────────────────────────────
 #  MAIN LOOP
