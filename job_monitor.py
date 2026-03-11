@@ -1,0 +1,439 @@
+"""
+Job Monitor Bot - Scrapes LinkedIn, Naukri, Indeed, Foundit
+Sends email alert the moment a new job is found.
+"""
+
+import requests
+from bs4 import BeautifulSoup
+import sqlite3
+import time
+import hashlib
+import random
+import smtplib
+from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from config import CONFIG
+from company_scrapers import scrape_companies
+
+# ─────────────────────────────────────────
+#  DATABASE
+# ─────────────────────────────────────────
+
+def init_db():
+    conn = sqlite3.connect("jobs.db")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS seen_jobs (
+            job_id   TEXT PRIMARY KEY,
+            title    TEXT,
+            company  TEXT,
+            location TEXT,
+            portal   TEXT,
+            url      TEXT,
+            found_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def is_new_job(job_id):
+    conn = sqlite3.connect("jobs.db")
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM seen_jobs WHERE job_id = ?", (job_id,))
+    found = c.fetchone() is None
+    conn.close()
+    return found
+
+def save_job(job):
+    conn = sqlite3.connect("jobs.db")
+    conn.execute(
+        "INSERT OR IGNORE INTO seen_jobs VALUES (?,?,?,?,?,?,?)",
+        (job["id"], job["title"], job["company"],
+         job.get("location",""), job["portal"],
+         job["url"], datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+# ─────────────────────────────────────────
+#  SCRAPERS
+# ─────────────────────────────────────────
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def make_id(*parts):
+    return hashlib.md5("".join(parts).encode()).hexdigest()
+
+def scrape_linkedin(keyword, location="India"):
+    jobs = []
+    try:
+        url = (
+            f"https://www.linkedin.com/jobs/search?"
+            f"keywords={requests.utils.quote(keyword)}"
+            f"&location={requests.utils.quote(location)}"
+            f"&f_TPR=r3600&sortBy=DD"
+        )
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for card in soup.find_all("div", class_="base-card")[:10]:
+            try:
+                t = card.find("h3", class_="base-search-card__title")
+                c = card.find("h4", class_="base-search-card__subtitle")
+                l = card.find("span", class_="job-search-card__location")
+                a = card.find("a", class_="base-card__full-link")
+                if not t or not a: continue
+                link = a["href"].split("?")[0]
+                jobs.append({"id": make_id(link), "title": t.get_text(strip=True),
+                    "company": c.get_text(strip=True) if c else "Unknown",
+                    "location": l.get_text(strip=True) if l else "",
+                    "portal": "LinkedIn", "url": link})
+            except: continue
+        print(f"  [LinkedIn] {len(jobs)} jobs for '{keyword}'")
+    except Exception as e:
+        print(f"  [LinkedIn] Error: {e}")
+    return jobs
+
+def scrape_naukri(keyword, location="india"):
+    jobs = []
+    try:
+        slug_kw = keyword.lower().replace(" ", "-")
+        slug_loc = location.lower().replace(" ", "-")
+        url = f"https://www.naukri.com/{slug_kw}-jobs-in-{slug_loc}"
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for card in (soup.find_all("article", class_="jobTuple") or
+                     soup.find_all("div", {"class": lambda c: c and "jobTuple" in c}))[:10]:
+            try:
+                t = card.find("a", class_="title")
+                c = card.find("a", class_="subTitle")
+                l = card.find("li", class_="location")
+                if not t: continue
+                link = t.get("href", "")
+                jobs.append({"id": make_id(t.get_text(strip=True),
+                    c.get_text(strip=True) if c else ""),
+                    "title": t.get_text(strip=True),
+                    "company": c.get_text(strip=True) if c else "Unknown",
+                    "location": l.get_text(strip=True) if l else "",
+                    "portal": "Naukri", "url": link})
+            except: continue
+        print(f"  [Naukri]   {len(jobs)} jobs for '{keyword}'")
+    except Exception as e:
+        print(f"  [Naukri] Error: {e}")
+    return jobs
+
+def scrape_indeed(keyword, location="India"):
+    jobs = []
+    try:
+        url = (
+            f"https://in.indeed.com/jobs?q={requests.utils.quote(keyword)}"
+            f"&l={requests.utils.quote(location)}&fromage=1&sort=date"
+        )
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for card in soup.find_all("div", class_="job_seen_beacon")[:10]:
+            try:
+                t = card.find("h2", class_="jobTitle")
+                c = card.find("span", class_="companyName")
+                l = card.find("div", class_="companyLocation")
+                a = card.find("a", class_="jcs-JobTitle")
+                if not t: continue
+                href = a.get("href","") if a else ""
+                link = f"https://in.indeed.com{href}" if href.startswith("/") else href
+                jobs.append({"id": make_id(link), "title": t.get_text(strip=True).replace("new","").strip(),
+                    "company": c.get_text(strip=True) if c else "Unknown",
+                    "location": l.get_text(strip=True) if l else "",
+                    "portal": "Indeed", "url": link})
+            except: continue
+        print(f"  [Indeed]   {len(jobs)} jobs for '{keyword}'")
+    except Exception as e:
+        print(f"  [Indeed] Error: {e}")
+    return jobs
+
+def scrape_foundit(keyword, location="india"):
+    jobs = []
+    try:
+        url = (
+            f"https://www.foundit.in/srp/results?"
+            f"query={requests.utils.quote(keyword)}&locations={location}&sort=1"
+        )
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for card in soup.find_all("div", class_="card-apply-content")[:10]:
+            try:
+                t = card.find("h3")
+                c = card.find("span", class_="company-name")
+                a = card.find("a")
+                if not t: continue
+                href = a.get("href","") if a else ""
+                link = f"https://www.foundit.in{href}" if href.startswith("/") else href
+                jobs.append({"id": make_id(t.get_text(strip=True),
+                    c.get_text(strip=True) if c else ""),
+                    "title": t.get_text(strip=True),
+                    "company": c.get_text(strip=True) if c else "Unknown",
+                    "location": location, "portal": "Foundit", "url": link})
+            except: continue
+        print(f"  [Foundit]  {len(jobs)} jobs for '{keyword}'")
+    except Exception as e:
+        print(f"  [Foundit] Error: {e}")
+    return jobs
+
+# ─────────────────────────────────────────
+#  COVER LETTER (Ollama — Free & Local)
+# ─────────────────────────────────────────
+
+def generate_cover_letter(job):
+    """
+    Uses Ollama running locally on your machine to generate cover letters.
+    100% free — no API key needed.
+
+    Ollama must be running: https://ollama.com
+    Pull a model first: ollama pull llama3.2
+    """
+    profile = CONFIG.get("USER_PROFILE", {})
+    if not profile:
+        return None
+
+    ollama_url   = CONFIG.get("OLLAMA_URL", "http://localhost:11434")
+    ollama_model = CONFIG.get("OLLAMA_MODEL", "llama3.2")
+
+    prompt = f"""Write a compelling cover letter (120-150 words) for this job.
+
+Applicant: {profile.get('name', 'Applicant')}
+Target Role: {profile.get('target_role', '')}
+Skills: {', '.join(profile.get('skills', []))}
+Experience: {profile.get('experience_years', 0)} years
+
+Job Title: {job['title']}
+Company: {job['company']}
+Portal: {job['portal']}
+
+Rules:
+- Start with a strong hook — NOT "I am writing to apply"
+- Mention one specific skill relevant to this role
+- Show genuine interest in the company
+- End with a confident call to action
+- Sound human and natural, not robotic or generic
+
+Return ONLY the cover letter text. No subject line, no extra commentary."""
+
+    try:
+        resp = requests.post(
+            f"{ollama_url}/api/generate",
+            json={
+                "model":  ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.7, "num_predict": 400}
+            },
+            timeout=120   # local LLMs can be slow on first run
+        )
+        resp.raise_for_status()
+        text = resp.json().get("response", "").strip()
+        print(f"  [Ollama]  ✅ Cover letter generated ({len(text)} chars)")
+        return text if text else None
+    except requests.exceptions.ConnectionError:
+        print("  [Ollama]  ⚠️  Cannot connect — is Ollama running?")
+        print("            Start it with: ollama serve")
+        return None
+    except Exception as e:
+        print(f"  [Ollama]  ❌ Error: {e}")
+        return None
+
+# ─────────────────────────────────────────
+#  EMAIL NOTIFICATION
+# ─────────────────────────────────────────
+
+PORTAL_COLORS = {
+    "LinkedIn": "#0A66C2",
+    "Naukri":   "#FF7555",
+    "Indeed":   "#2164f3",
+    "Foundit":  "#6C47FF",
+}
+
+def send_email(job, cover_letter=None):
+    user  = CONFIG.get("EMAIL_USER","").strip()
+    pwd   = CONFIG.get("EMAIL_PASS","").strip()
+    to    = CONFIG.get("EMAIL_TO","").strip()
+    if not user or not pwd or not to:
+        print("  [Email] Not configured — skipping")
+        return
+
+    color = PORTAL_COLORS.get(job["portal"], "#6366f1")
+    subject = f"⚡ New Job: {job['title']} at {job['company']} [{job['portal']}]"
+
+    cover_html = ""
+    if cover_letter:
+        cover_html = f"""
+        <div style="background:#f0f4ff;border-left:4px solid #6366f1;
+                    border-radius:8px;padding:16px 20px;margin-top:20px">
+          <p style="margin:0 0 8px;font-weight:700;color:#6366f1;font-size:14px">
+            📝 AI-Generated Cover Letter Draft
+          </p>
+          <p style="margin:0;color:#333;line-height:1.8;font-size:14px;
+                    white-space:pre-wrap">{cover_letter}</p>
+          <p style="margin:10px 0 0;font-size:11px;color:#999">
+            ✏️ Personalize this before sending!
+          </p>
+        </div>"""
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+      <div style="max-width:580px;margin:30px auto;background:#fff;
+                  border-radius:12px;overflow:hidden;
+                  box-shadow:0 2px 12px rgba(0,0,0,0.08)">
+
+        <!-- Header -->
+        <div style="background:{color};padding:24px 28px">
+          <p style="margin:0;color:rgba(255,255,255,0.8);font-size:13px">Job Monitor Bot</p>
+          <h1 style="margin:4px 0 0;color:#fff;font-size:22px">🚨 New Job Alert!</h1>
+        </div>
+
+        <!-- Body -->
+        <div style="padding:24px 28px">
+          <div style="background:#fafafa;border:1px solid #eee;
+                      border-radius:10px;padding:20px">
+            <h2 style="margin:0 0 12px;color:#1a1a2e;font-size:20px">{job['title']}</h2>
+            <table style="border-collapse:collapse;width:100%">
+              <tr>
+                <td style="padding:5px 0;color:#888;font-size:13px;width:100px">🏭 Company</td>
+                <td style="padding:5px 0;color:#333;font-size:14px;font-weight:600">{job['company']}</td>
+              </tr>
+              <tr>
+                <td style="padding:5px 0;color:#888;font-size:13px">📍 Location</td>
+                <td style="padding:5px 0;color:#333;font-size:14px">{job.get('location','India')}</td>
+              </tr>
+              <tr>
+                <td style="padding:5px 0;color:#888;font-size:13px">🌐 Portal</td>
+                <td style="padding:5px 0">
+                  <span style="background:{color}20;color:{color};
+                               padding:2px 10px;border-radius:20px;
+                               font-size:12px;font-weight:700">{job['portal']}</span>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:5px 0;color:#888;font-size:13px">⏰ Found at</td>
+                <td style="padding:5px 0;color:#333;font-size:14px">
+                  {datetime.now().strftime('%d %b %Y, %I:%M %p')}
+                </td>
+              </tr>
+            </table>
+          </div>
+
+          <a href="{job['url']}"
+             style="display:block;text-align:center;margin:20px 0 0;
+                    padding:14px;background:{color};color:#fff;
+                    text-decoration:none;border-radius:8px;
+                    font-weight:700;font-size:16px;letter-spacing:0.3px">
+            ⚡ Apply Now — Be Among the First!
+          </a>
+
+          {cover_html}
+        </div>
+
+        <!-- Footer -->
+        <div style="background:#f9f9f9;padding:14px 28px;border-top:1px solid #eee">
+          <p style="margin:0;color:#aaa;font-size:11px;text-align:center">
+            Sent by your Job Monitor Bot •
+            Apply ASAP — early applicants get 3× more callbacks
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = f"Job Monitor Bot <{user}>"
+    msg["To"]      = to
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(user, pwd)
+            s.sendmail(user, to, msg.as_string())
+        print(f"  [Email] ✅ Sent → {job['title']} @ {job['company']}")
+    except Exception as e:
+        print(f"  [Email] ❌ Error: {e}")
+
+# ─────────────────────────────────────────
+#  MAIN LOOP
+# ─────────────────────────────────────────
+
+def run_once():
+    print(f"\n{'='*52}")
+    print(f"  🔍 Scan at {datetime.now().strftime('%d %b %Y  %I:%M:%S %p')}")
+    print(f"{'='*52}")
+
+    keywords = CONFIG.get("KEYWORDS", ["developer"])
+    location = CONFIG.get("LOCATION", "India")
+    portals  = CONFIG.get("PORTALS", ["linkedin","naukri","indeed","foundit"])
+    all_jobs = []
+
+    scraper_map = {
+        "linkedin": scrape_linkedin,
+        "naukri":   scrape_naukri,
+        "indeed":   scrape_indeed,
+        "foundit":  scrape_foundit,
+    }
+
+    for kw in keywords:
+        print(f"\n📌 '{kw}'")
+        for portal in portals:
+            if portal in scraper_map:
+                all_jobs += scraper_map[portal](kw, location)
+                time.sleep(random.uniform(2, 4))
+
+    # ── Company career portals (keyword-filtered, no location needed) ──
+    all_jobs += scrape_companies(keywords)
+
+    new_count = 0
+    for job in all_jobs:
+        if is_new_job(job["id"]):
+            print(f"\n  🆕 NEW: {job['title']} @ {job['company']} [{job['portal']}]")
+            save_job(job)
+            cover = None
+            if CONFIG.get("GENERATE_COVER_LETTERS"):
+                cover = generate_cover_letter(job)
+            send_email(job, cover)
+            new_count += 1
+            time.sleep(1)
+
+    print(f"\n  ✅ {new_count} new job(s) | {len(all_jobs)} total scanned")
+
+def main():
+    print("╔══════════════════════════════════════╗")
+    print("║   ⚡  Job Monitor Bot  —  Email Mode  ║")
+    print("╚══════════════════════════════════════╝")
+    init_db()
+
+    mins = CONFIG.get("CHECK_INTERVAL_MINUTES", 20)
+    print(f"  Interval : every {mins} minutes")
+    print(f"  Keywords : {CONFIG.get('KEYWORDS', [])}")
+    print(f"  Location : {CONFIG.get('LOCATION', 'India')}")
+    print(f"  Email to : {CONFIG.get('EMAIL_TO', 'not set')}")
+    print()
+
+    while True:
+        try:
+            run_once()
+        except KeyboardInterrupt:
+            print("\n👋 Bot stopped.")
+            break
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+
+        next_time = datetime.now().strftime("%I:%M %p")
+        print(f"\n  💤 Sleeping {mins} min... (press Ctrl+C to stop)")
+        time.sleep(mins * 60)
+
+if __name__ == "__main__":
+    main()
