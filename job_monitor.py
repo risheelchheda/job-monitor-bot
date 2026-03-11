@@ -351,7 +351,10 @@ def send_email_brevo(job, html, subject):
 
     # Gmail/Yahoo/freemail domains are blocked by DMARC when used as Brevo sender.
     # Use Brevo's own safe sender domain instead. You still RECEIVE at your Gmail.
-    safe_sender_email = "no-reply@brevo-mail.io"
+    # Use BREVO_SENDER from Railway env vars (set it to your Brevo account login email)
+    # That email is already verified by Brevo automatically on all accounts.
+    import os as _os
+    safe_sender_email = _os.environ.get("BREVO_SENDER", "").strip() or to
     safe_sender_name  = "Job Monitor Bot"
 
     try:
