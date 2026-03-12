@@ -22,7 +22,7 @@ CONFIG = {
         "Python Developer",
     ],
 
-    "LOCATION": "Mumbai",
+    "LOCATION": "India",
 
     "PORTALS": ["linkedin", "naukri", "indeed", "foundit"],
 
