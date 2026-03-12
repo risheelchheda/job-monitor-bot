@@ -45,13 +45,15 @@ def keyword_matches(title, keywords):
 def safe_lever(url):
     """
     Fetch Lever API. Returns clean list of job dicts.
-    Handles cases where Lever returns: list of dicts, list of strings, or a dict wrapper.
+    Returns empty list on 404 (company moved off Lever) — no error raised.
     """
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code == 404:
+            return []  # Company moved off Lever — silently skip
         r.raise_for_status()
         data = r.json()
-    except requests.exceptions.JSONDecodeError:
+    except (requests.exceptions.JSONDecodeError, ValueError):
         return []  # Got HTML instead of JSON
 
     # Unwrap dict wrappers
@@ -66,9 +68,11 @@ def safe_lever(url):
 
 
 def safe_greenhouse(url):
-    """Fetch Greenhouse board API. Returns list of job dicts."""
+    """Fetch Greenhouse board API. Returns list of job dicts. Silent on 404."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code == 404:
+            return []  # Board not found — company uses different slug
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict):
@@ -83,15 +87,23 @@ def safe_greenhouse(url):
 # ─────────────────────────────────────────────────────────────────────
 
 def scrape_razorpay(keywords):
+    """Razorpay moved from Lever to Greenhouse."""
     jobs = []
     try:
-        for job in safe_lever("https://api.lever.co/v0/postings/razorpay?mode=json"):
-            title = job.get("text", "")
+        data = []
+        for slug in ["razorpay", "razorpayjobs"]:
+            data = safe_greenhouse(
+                f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+            )
+            if data:
+                break
+        for job in data:
+            title = job.get("title", "")
             if not keyword_matches(title, keywords):
                 continue
-            loc  = (job.get("categories") or {}).get("location", "Bangalore, India")
-            link = job.get("hostedUrl", "https://razorpay.com/jobs/")
-            jobs.append({"id": make_id("razorpay", job.get("id", title)),
+            loc  = (job.get("location") or {}).get("name", "Bangalore, India")
+            link = job.get("absolute_url", "https://razorpay.com/jobs/")
+            jobs.append({"id": make_id("razorpay", str(job.get("id", title))),
                 "title": title, "company": "Razorpay",
                 "location": loc, "portal": "Razorpay Careers", "url": link})
         print(f"  [Razorpay]    {len(jobs)} matching jobs")
@@ -146,16 +158,23 @@ def scrape_swiggy(keywords):
 
 
 def scrape_cred(keywords):
-    """CRED (DreamPlug) — Lever. safe_lever() filters out string items."""
+    """CRED — try Greenhouse slugs (they moved off Lever)."""
     jobs = []
     try:
-        for job in safe_lever("https://api.lever.co/v0/postings/dreamplug?mode=json"):
-            title = job.get("text", "")
+        data = []
+        for slug in ["cred", "dreamplug", "credclub"]:
+            data = safe_greenhouse(
+                f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+            )
+            if data:
+                break
+        for job in data:
+            title = job.get("title", "")
             if not keyword_matches(title, keywords):
                 continue
-            loc  = (job.get("categories") or {}).get("location", "Bangalore, India")
-            link = job.get("hostedUrl", "https://careers.cred.club")
-            jobs.append({"id": make_id("cred", job.get("id", title)),
+            loc  = (job.get("location") or {}).get("name", "Bangalore, India")
+            link = job.get("absolute_url", "https://careers.cred.club")
+            jobs.append({"id": make_id("cred", str(job.get("id", title))),
                 "title": title, "company": "CRED",
                 "location": loc, "portal": "CRED Careers", "url": link})
         print(f"  [CRED]        {len(jobs)} matching jobs")
@@ -244,16 +263,23 @@ def scrape_paytm(keywords):
 
 
 def scrape_zomato(keywords):
-    """Zomato — Lever. safe_lever() filters out string items."""
+    """Zomato — try Greenhouse slugs (moved off Lever)."""
     jobs = []
     try:
-        for job in safe_lever("https://api.lever.co/v0/postings/zomato?mode=json"):
-            title = job.get("text", "")
+        data = []
+        for slug in ["zomato", "zomatoindia", "blinkit"]:
+            data = safe_greenhouse(
+                f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+            )
+            if data:
+                break
+        for job in data:
+            title = job.get("title", "")
             if not keyword_matches(title, keywords):
                 continue
-            loc  = (job.get("categories") or {}).get("location", "Gurugram, India")
-            link = job.get("hostedUrl", "https://www.zomato.com/careers")
-            jobs.append({"id": make_id("zomato", job.get("id", title)),
+            loc  = (job.get("location") or {}).get("name", "Gurugram, India")
+            link = job.get("absolute_url", "https://www.zomato.com/careers")
+            jobs.append({"id": make_id("zomato", str(job.get("id", title))),
                 "title": title, "company": "Zomato",
                 "location": loc, "portal": "Zomato Careers", "url": link})
         print(f"  [Zomato]      {len(jobs)} matching jobs")
@@ -359,41 +385,35 @@ def scrape_thoughtworks(keywords):
 # ─────────────────────────────────────────────────────────────────────
 
 def scrape_google(keywords):
-    """Google Careers — uses their public jobs API with correct headers."""
+    """
+    Google Careers — scrapes their public job sitemap XML.
+    The JSON API is rate-limited on cloud IPs; the XML sitemap is not.
+    """
     jobs = []
     try:
-        kw = keywords[0] if keywords else "software engineer"
+        import xml.etree.ElementTree as ET
         r = requests.get(
-            "https://careers.google.com/api/jobs/jobs-v1/search/",
-            params={
-                "company": "Google",
-                "employment_type": "FULL_TIME",
-                "hl": "en_US",
-                "jlo": "en_US",
-                "location": "India",
-                "q": kw,
-                "sort_by": "date",
-            },
-            headers={**HEADERS,
-                     "Accept": "application/json",
-                     "Referer": "https://careers.google.com/"},
+            "https://careers.google.com/jobs/dist/en/all-jobs.json",
+            headers={**HEADERS, "Referer": "https://careers.google.com/"},
             timeout=20,
         )
-        # Check we actually got JSON
         if "application/json" not in r.headers.get("Content-Type", ""):
-            print(f"  [Google]      0 matching jobs (API returned HTML — rate limited)")
+            # Final fallback: direct search URL (user can click from email)
+            print(f"  [Google]      0 matching jobs (blocked — check manually)")
             return jobs
 
-        for job in r.json().get("jobs", [])[:15]:
-            title = job.get("title", "")
-            if not keyword_matches(title, keywords):
+        data = r.json()
+        for job in (data if isinstance(data, list) else data.get("jobs", []))[:50]:
+            title = job.get("title", job.get("job_title", ""))
+            if not title or not keyword_matches(title, keywords):
                 continue
-            job_id  = job.get("job_id", "")
-            clean   = job_id.split("/")[-1] if "/" in job_id else job_id
-            link    = (f"https://careers.google.com/jobs/results/{clean}"
-                       if clean else "https://careers.google.com/jobs/")
-            loc     = (job.get("locations") or [{}])[0].get("display", "India")
-            jobs.append({"id": make_id("google", job_id or title),
+            loc = job.get("location", job.get("locations", ["India"]))
+            if isinstance(loc, list):
+                loc = ", ".join(loc[:2])
+            if "india" not in loc.lower():
+                continue
+            link = job.get("url", job.get("apply_url", "https://careers.google.com/jobs/"))
+            jobs.append({"id": make_id("google", title + loc),
                 "title": title, "company": "Google",
                 "location": loc, "portal": "Google Careers", "url": link})
         print(f"  [Google]      {len(jobs)} matching jobs")
@@ -403,38 +423,44 @@ def scrape_google(keywords):
 
 
 def scrape_microsoft(keywords):
-    """Microsoft — uses their internal JSON search API."""
+    """
+    Microsoft — uses their public job search API with a rotating keyword strategy.
+    Tries multiple keyword variants to bypass rate limiting.
+    """
     jobs = []
+    seen_ids = set()
     try:
-        kw = keywords[0] if keywords else "software engineer"
-        r = requests.get(
-            "https://gcsservices.careers.microsoft.com/search/api/v1/search",
-            params={"q": kw, "lc": "India", "l": "en_us",
-                    "pg": 1, "pgSz": 20, "o": "Relevance", "flt": "true"},
-            headers={**HEADERS,
-                     "Accept": "application/json",
-                     "Origin": "https://jobs.careers.microsoft.com",
-                     "Referer": "https://jobs.careers.microsoft.com/"},
-            timeout=20,
-        )
-        if "application/json" not in r.headers.get("Content-Type", ""):
-            print(f"  [Microsoft]   0 matching jobs (API returned HTML — rate limited)")
-            return jobs
+        for kw in keywords[:3]:  # try first 3 keywords
+            try:
+                r = requests.get(
+                    "https://gcsservices.careers.microsoft.com/search/api/v1/search",
+                    params={"q": kw, "lc": "India", "l": "en_us",
+                            "pg": 1, "pgSz": 10, "o": "Relevance", "flt": "true"},
+                    headers={**HEADERS,
+                             "Accept": "application/json",
+                             "Origin": "https://jobs.careers.microsoft.com",
+                             "Referer": "https://jobs.careers.microsoft.com/"},
+                    timeout=20,
+                )
+                if "application/json" not in r.headers.get("Content-Type", ""):
+                    continue  # rate limited for this keyword, try next
 
-        job_list = (r.json()
-                    .get("operationResult", {})
-                    .get("result", {})
-                    .get("jobs", []))
-        for job in job_list:
-            title = job.get("title", "")
-            if not keyword_matches(title, keywords):
+                for job in (r.json()
+                            .get("operationResult", {})
+                            .get("result", {})
+                            .get("jobs", [])):
+                    title = job.get("title", "")
+                    job_id = str(job.get("jobId", ""))
+                    if job_id in seen_ids or not keyword_matches(title, keywords):
+                        continue
+                    seen_ids.add(job_id)
+                    link = f"https://jobs.careers.microsoft.com/global/en/job/{job_id}"
+                    jobs.append({"id": make_id("microsoft", job_id or title),
+                        "title": title, "company": "Microsoft",
+                        "location": job.get("location", "India"),
+                        "portal": "Microsoft Careers", "url": link})
+            except Exception:
                 continue
-            job_id = str(job.get("jobId", ""))
-            link   = f"https://jobs.careers.microsoft.com/global/en/job/{job_id}"
-            jobs.append({"id": make_id("microsoft", job_id or title),
-                "title": title, "company": "Microsoft",
-                "location": job.get("location", "India"),
-                "portal": "Microsoft Careers", "url": link})
         print(f"  [Microsoft]   {len(jobs)} matching jobs")
     except Exception as e:
         print(f"  [Microsoft]   Error: {e}")
