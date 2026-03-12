@@ -369,6 +369,12 @@ def send_email_brevo(job, html, subject):
                 "to":          [{"email": to}],
                 "subject":     subject,
                 "htmlContent": html,
+                "headers": {
+                    "X-Priority": "1",
+                    "X-MSMail-Priority": "High",
+                    "Importance": "High",
+                },
+                "tags": ["job-alert"],
             },
             timeout=15,
         )
