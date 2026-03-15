@@ -26,7 +26,7 @@ CONFIG = {
 
     "PORTALS": ["linkedin", "naukri", "indeed", "foundit"],
 
-    "CHECK_INTERVAL_MINUTES": 20,
+    "CHECK_INTERVAL_MINUTES": 60,
 
     # ─────────────────────────────────────
     # 🏢 COMPANY CAREER PORTALS
