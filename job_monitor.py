@@ -572,28 +572,23 @@ def run_once():
 
     print(f"\n  ✅ {len(new_jobs)} new job(s) | {len(all_jobs)} total scanned")
 
-    # ── Send ONE digest email for all new jobs ──
-    # This uses 1 email per scan instead of 1 per job — never hits limits.
-    if new_jobs:
-        subject = f"⚡ {len(new_jobs)} New Job Alert{'s' if len(new_jobs) > 1 else ''} — {datetime.now().strftime('%d %b %Y')}"
-        html    = build_digest_email(new_jobs)
+    # ── Send one email per new job ──
+    for job in new_jobs:
+        subject = f"⚡ New Job: {job['title']} at {job['company']} [{job['portal']}]"
+        html    = build_email_html(job)
+        label   = f"{job['title']} @ {job['company']}"
 
-        # Try direct Gmail SMTP first (free, no limits)
         ok, detail = send_email_smtp_direct(subject, html)
         if ok:
-            print(f"  [Email] ✅ Digest sent via Gmail SMTP (port {detail}) → {len(new_jobs)} jobs")
-        else:
-            # Fallback to Brevo if SMTP fails
-            print(f"  [Email] SMTP failed ({detail}) — trying Brevo...")
-            if CONFIG.get("BREVO_API_KEY", "").strip():
-                # Build a dummy job for the brevo function signature
-                dummy = {"title": subject, "company": "", "portal": "", "url": "", "location": ""}
-                if send_email_brevo(dummy, html, subject):
-                    print(f"  [Email] ✅ Digest sent via Brevo → {len(new_jobs)} jobs")
-                else:
-                    print(f"  [Email] ❌ All methods failed — {len(new_jobs)} jobs not emailed")
+            print(f"  [Email] ✅ Sent (SMTP port {detail}) → {label}")
+        elif CONFIG.get("BREVO_API_KEY", "").strip():
+            if send_email_brevo(job, html, subject):
+                print(f"  [Email] ✅ Sent (Brevo) → {label}")
             else:
-                print(f"  [Email] ❌ No fallback configured — set EMAIL_PASS in Railway")
+                print(f"  [Email] ❌ Failed → {label}")
+        else:
+            print(f"  [Email] ❌ SMTP failed ({detail}) and no Brevo key set")
+        time.sleep(1)
 
 def main():
     print("╔══════════════════════════════════════╗")
