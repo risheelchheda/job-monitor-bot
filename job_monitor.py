@@ -429,36 +429,107 @@ def send_email_smtp(job, html, subject):
         return False
 
 
-def send_email(job, cover_letter=None):
+def send_email_smtp_direct(subject, html):
     """
-    Send job alert email.
-    Priority: Brevo API → Gmail SMTP port 587 → Gmail SMTP port 465
-    Brevo works on Railway; SMTP works locally.
+    Send directly via Gmail SMTP — no third-party service needed.
+    Tries port 587 (STARTTLS) first, then 465 (SSL).
+    Both work on Railway free tier.
     """
-    to = CONFIG.get("EMAIL_TO", "").strip()
-    if not to:
-        print("  [Email] Not configured — skipping")
-        return
+    user = CONFIG.get("EMAIL_USER", "").strip()
+    pwd  = CONFIG.get("EMAIL_PASS", "").strip()
+    to   = CONFIG.get("EMAIL_TO",   "").strip()
+    if not user or not pwd or not to:
+        return False, "EMAIL_USER/EMAIL_PASS/EMAIL_TO not configured"
 
-    subject = f"⚡ New Job: {job['title']} at {job['company']} [{job['portal']}]"
-    html    = build_email_html(job, cover_letter)
-    label   = f"{job['title']} @ {job['company']}"
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = f"Job Monitor Bot <{user}>"
+    msg["To"]      = to
+    msg["X-Priority"] = "1"
+    msg["Importance"] = "High"
+    msg.attach(MIMEText(html, "html"))
 
-    # 1. Try Brevo (best for Railway)
-    if CONFIG.get("BREVO_API_KEY", "").strip():
-        if send_email_brevo(job, html, subject):
-            print(f"  [Email] ✅ Sent (Brevo) → {label}")
-            return
-        print("  [Email] Brevo failed — trying SMTP...")
+    # Port 587 — STARTTLS (works on Railway)
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=25) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(user, pwd)
+            s.sendmail(user, to, msg.as_string())
+        return True, "587"
+    except Exception as e587:
+        pass
 
-    # 2. Try Gmail SMTP (ports 587 then 465)
-    if CONFIG.get("EMAIL_PASS", "").strip():
-        if send_email_smtp(job, html, subject):
-            print(f"  [Email] ✅ Sent (SMTP) → {label}")
-        else:
-            print(f"  [Email] ❌ All methods failed for: {label}")
-    else:
-        print("  [Email] ❌ EMAIL_PASS not set — cannot send via SMTP")
+    # Port 465 — SSL (works locally)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=25) as s:
+            s.login(user, pwd)
+            s.sendmail(user, to, msg.as_string())
+        return True, "465"
+    except Exception as e465:
+        return False, str(e465)
+
+
+def build_digest_email(new_jobs):
+    """Build one email containing all new jobs found in this scan."""
+    count  = len(new_jobs)
+    portal_colors = {
+        "LinkedIn": "#0A66C2", "Naukri": "#FF7555",
+        "Indeed": "#2164f3", "Foundit": "#6C47FF",
+    }
+
+    cards = ""
+    for job in new_jobs:
+        color = portal_colors.get(job["portal"], "#6366f1")
+        cards += f"""
+        <div style="border:1px solid #e5e7eb;border-radius:10px;padding:18px 20px;
+                    margin-bottom:14px;background:#fff;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div>
+              <h3 style="margin:0 0 4px;color:#1a1a2e;font-size:16px">{job['title']}</h3>
+              <p style="margin:0;color:#555;font-size:14px">
+                🏭 {job['company']} &nbsp;·&nbsp; 📍 {job.get('location','India')}
+              </p>
+            </div>
+            <span style="background:{color}20;color:{color};padding:3px 10px;
+                         border-radius:20px;font-size:11px;font-weight:700;
+                         white-space:nowrap;margin-left:12px">{job['portal']}</span>
+          </div>
+          <a href="{job['url']}"
+             style="display:inline-block;margin-top:12px;padding:8px 18px;
+                    background:{color};color:#fff;text-decoration:none;
+                    border-radius:6px;font-size:13px;font-weight:600">
+            ⚡ Apply Now
+          </a>
+        </div>"""
+
+    return f"""<!DOCTYPE html>
+    <html>
+    <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+      <div style="max-width:600px;margin:30px auto;background:#fff;
+                  border-radius:12px;overflow:hidden;
+                  box-shadow:0 2px 12px rgba(0,0,0,0.08)">
+        <div style="background:#6366f1;padding:24px 28px">
+          <p style="margin:0;color:rgba(255,255,255,0.8);font-size:13px">Job Monitor Bot</p>
+          <h1 style="margin:6px 0 0;color:#fff;font-size:22px">
+            🚨 {count} New Job{'s' if count > 1 else ''} Found!
+          </h1>
+          <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px">
+            {datetime.now().strftime('%d %b %Y, %I:%M %p')}
+          </p>
+        </div>
+        <div style="padding:24px 28px">
+          {cards}
+        </div>
+        <div style="background:#f9f9f9;padding:14px 28px;border-top:1px solid #eee">
+          <p style="margin:0;color:#aaa;font-size:11px;text-align:center">
+            Job Monitor Bot · Apply early — first applicants get 3× more callbacks
+          </p>
+        </div>
+      </div>
+    </body></html>"""
+
 
 # ─────────────────────────────────────────
 #  MAIN LOOP
@@ -488,22 +559,41 @@ def run_once():
                 all_jobs += scraper_map[portal](kw, location)
                 time.sleep(random.uniform(2, 4))
 
-    # ── Company career portals (keyword-filtered, no location needed) ──
+    # ── Company career portals ──
     all_jobs += scrape_companies(keywords)
 
-    new_count = 0
+    # ── Find genuinely new jobs ──
+    new_jobs = []
     for job in all_jobs:
         if is_new_job(job["id"]):
-            print(f"\n  🆕 NEW: {job['title']} @ {job['company']} [{job['portal']}]")
+            print(f"  🆕 NEW: {job['title']} @ {job['company']} [{job['portal']}]")
             save_job(job)
-            cover = None
-            if CONFIG.get("GENERATE_COVER_LETTERS"):
-                cover = generate_cover_letter(job)
-            send_email(job, cover)
-            new_count += 1
-            time.sleep(1)
+            new_jobs.append(job)
 
-    print(f"\n  ✅ {new_count} new job(s) | {len(all_jobs)} total scanned")
+    print(f"\n  ✅ {len(new_jobs)} new job(s) | {len(all_jobs)} total scanned")
+
+    # ── Send ONE digest email for all new jobs ──
+    # This uses 1 email per scan instead of 1 per job — never hits limits.
+    if new_jobs:
+        subject = f"⚡ {len(new_jobs)} New Job Alert{'s' if len(new_jobs) > 1 else ''} — {datetime.now().strftime('%d %b %Y')}"
+        html    = build_digest_email(new_jobs)
+
+        # Try direct Gmail SMTP first (free, no limits)
+        ok, detail = send_email_smtp_direct(subject, html)
+        if ok:
+            print(f"  [Email] ✅ Digest sent via Gmail SMTP (port {detail}) → {len(new_jobs)} jobs")
+        else:
+            # Fallback to Brevo if SMTP fails
+            print(f"  [Email] SMTP failed ({detail}) — trying Brevo...")
+            if CONFIG.get("BREVO_API_KEY", "").strip():
+                # Build a dummy job for the brevo function signature
+                dummy = {"title": subject, "company": "", "portal": "", "url": "", "location": ""}
+                if send_email_brevo(dummy, html, subject):
+                    print(f"  [Email] ✅ Digest sent via Brevo → {len(new_jobs)} jobs")
+                else:
+                    print(f"  [Email] ❌ All methods failed — {len(new_jobs)} jobs not emailed")
+            else:
+                print(f"  [Email] ❌ No fallback configured — set EMAIL_PASS in Railway")
 
 def main():
     print("╔══════════════════════════════════════╗")
