@@ -19,7 +19,6 @@ CONFIG = {
         "Java Developer",
         "Spring Boot Developer",
         "Full Stack Developer",
-        "Python Developer",
     ],
 
     "LOCATION": "India",
