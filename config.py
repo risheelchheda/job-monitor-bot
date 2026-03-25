@@ -1,7 +1,9 @@
 """
-config.py  —  Cloud-ready version for Railway deployment
-Secrets are read from environment variables (set in Railway dashboard)
-so your password is NEVER stored in code or pushed to GitHub.
+config.py  —  AWS Lambda version
+- CHECK_INTERVAL_MINUTES is REMOVED — EventBridge cron triggers Lambda every 20 min
+- Brevo is REMOVED — email is sent directly via Gmail SMTP
+- All secrets are read from Lambda Environment Variables
+  (set them in AWS Console → Lambda → Configuration → Environment Variables)
 """
 
 import os
@@ -25,8 +27,6 @@ CONFIG = {
 
     "PORTALS": ["linkedin", "naukri", "indeed", "foundit"],
 
-    "CHECK_INTERVAL_MINUTES": 60,
-
     # ─────────────────────────────────────
     # 🏢 COMPANY CAREER PORTALS
     # ─────────────────────────────────────
@@ -39,42 +39,42 @@ CONFIG = {
     ],
 
     # ─────────────────────────────────────
-    # 📧 EMAIL  ← reads from Railway env vars
+    # 📧 EMAIL  ← reads from Lambda env vars
     # ─────────────────────────────────────
-    # Brevo is used on Railway (HTTP, no port blocking)
-    # Gmail SMTP is used as fallback on local machine
+    # Set these 3 variables in:
+    # AWS Console → Lambda → Your Function → Configuration → Environment Variables
     #
-    # BREVO SETUP (free, 300 emails/day):
-    # 1. Sign up free at brevo.com
-    # 2. Go to Settings → SMTP & API → API Keys → Generate
-    # 3. Add to Railway Variables as BREVO_API_KEY
+    # EMAIL_USER  → your Gmail address         e.g. risheelchheda19@gmail.com
+    # EMAIL_PASS  → Gmail App Password         (NOT your Gmail login password)
+    #               Generate at: myaccount.google.com → Security → App Passwords
+    # EMAIL_TO    → where to deliver alerts    e.g. risheelchheda19@gmail.com
+    # ─────────────────────────────────────
 
-    "EMAIL_USER": os.environ.get("EMAIL_USER", "risheelchheda19@gmail.com"),
+    "EMAIL_USER": os.environ.get("EMAIL_USER", ""),
     "EMAIL_PASS": os.environ.get("EMAIL_PASS", ""),
-    "EMAIL_TO": os.environ.get("EMAIL_TO", "risheelchheda19@gmail.com"),
-    "BREVO_API_KEY": os.environ.get("BREVO_API_KEY", ""),
+    "EMAIL_TO":   os.environ.get("EMAIL_TO",   ""),
 
     # ─────────────────────────────────────
-    # 🤖 OLLAMA — disabled on cloud
-    # Ollama runs locally only; on Railway
-    # cover letters are simply skipped.
+    # 🤖 OLLAMA — disabled on Lambda
+    # Lambda has no local GPU/CPU for LLMs.
+    # Cover letters are skipped entirely.
     # ─────────────────────────────────────
 
-    "OLLAMA_URL": "http://localhost:11434",
-    "OLLAMA_MODEL": "llama3.2",
-    "GENERATE_COVER_LETTERS": False,  # ← must be False on cloud
+    "OLLAMA_URL":             "http://localhost:11434",
+    "OLLAMA_MODEL":           "llama3.2",
+    "GENERATE_COVER_LETTERS": False,  # must stay False on Lambda
 
     # ─────────────────────────────────────
     # 👤 YOUR PROFILE
     # ─────────────────────────────────────
 
     "USER_PROFILE": {
-        "name": "Risheel Chheda",
-        "current_company": "NPCI (National Payments Corporation of India)",
-        "current_role": "Software Developer",
-        "target_role": "Software Developer / Backend Engineer",
+        "name":             "Risheel Chheda",
+        "current_company":  "NPCI (National Payments Corporation of India)",
+        "current_role":     "Software Developer",
+        "target_role":      "Software Developer / Backend Engineer",
         "experience_years": 1.5,
-        "education": "B.Tech Electronics Engineering, VJTI Mumbai (CPI: 8.8/10)",
+        "education":        "B.Tech Electronics Engineering, VJTI Mumbai (CPI: 8.8/10)",
         "skills": [
             "Java", "Python", "JavaScript", "SQL", "C++",
             "Spring Boot", "Spring MVC", "Spring AI", "REST APIs",

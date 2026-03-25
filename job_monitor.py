@@ -1,6 +1,28 @@
 """
-Job Monitor Bot - Scrapes LinkedIn, Naukri, Indeed, Foundit
-Sends email alert the moment a new job is found.
+job_monitor.py  —  AWS Lambda version
+
+KEY CHANGES vs Railway version:
+  1. lambda_handler(event, context) replaces main() + while True loop
+     EventBridge calls lambda_handler every 20 min — no sleep() needed.
+
+  2. SQLite DB lives at /tmp/jobs.db
+     Lambda gives you a writable /tmp (512 MB).
+     IMPORTANT: /tmp is ephemeral — it persists only within the same
+     Lambda container instance (warm invocations). A cold start gets a
+     fresh /tmp, meaning the bot may re-alert old jobs.
+     ✅ For production-grade dedup, replace SQLite with DynamoDB (see
+        the comment block near init_db()). For personal use SQLite in
+        /tmp is fine since most warm invocations reuse the same container.
+
+  3. Brevo removed — email is sent via Gmail SMTP only (port 587 / 465).
+     Lambda does NOT block outbound SMTP like Railway did, so direct
+     Gmail SMTP works reliably here.
+
+  4. time.sleep() calls between scrapers are kept short (1–2 s) to stay
+     within Lambda's 15-minute timeout. Total scan time is ~5–8 minutes
+     for this many companies.
+
+  5. No cover letter generation — Ollama is local-only.
 """
 
 import requests
@@ -10,6 +32,7 @@ import time
 import hashlib
 import random
 import smtplib
+import os
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -17,11 +40,39 @@ from config import CONFIG
 from company_scrapers import scrape_companies
 
 # ─────────────────────────────────────────
-#  DATABASE
+#  DATABASE  (SQLite in Lambda /tmp)
+# ─────────────────────────────────────────
+# Lambda's /tmp is writable and persists across warm invocations of the
+# SAME container. Cold starts get a fresh /tmp (no history).
+#
+# 💡 Want true persistence across cold starts?
+#    Replace the three functions below with DynamoDB calls:
+#
+#    import boto3
+#    _ddb  = boto3.resource("dynamodb", region_name="ap-south-1")
+#    _table = _ddb.Table("job_monitor_seen")
+#
+#    def is_new_job(job_id):
+#        resp = _table.get_item(Key={"job_id": job_id})
+#        return "Item" not in resp
+#
+#    def save_job(job):
+#        _table.put_item(Item={
+#            "job_id":   job["id"],
+#            "title":    job["title"],
+#            "company":  job["company"],
+#            "location": job.get("location", ""),
+#            "portal":   job["portal"],
+#            "url":      job["url"],
+#            "found_at": datetime.now().isoformat(),
+#        })
 # ─────────────────────────────────────────
 
+DB_PATH = "/tmp/jobs.db"   # ← Lambda writable temp storage
+
+
 def init_db():
-    conn = sqlite3.connect("jobs.db")
+    conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS seen_jobs (
             job_id   TEXT PRIMARY KEY,
@@ -36,27 +87,30 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def is_new_job(job_id):
-    conn = sqlite3.connect("jobs.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT 1 FROM seen_jobs WHERE job_id = ?", (job_id,))
     found = c.fetchone() is None
     conn.close()
     return found
 
+
 def save_job(job):
-    conn = sqlite3.connect("jobs.db")
+    conn = sqlite3.connect(DB_PATH)
     conn.execute(
         "INSERT OR IGNORE INTO seen_jobs VALUES (?,?,?,?,?,?,?)",
         (job["id"], job["title"], job["company"],
-         job.get("location",""), job["portal"],
+         job.get("location", ""), job["portal"],
          job["url"], datetime.now().isoformat())
     )
     conn.commit()
     conn.close()
 
+
 # ─────────────────────────────────────────
-#  SCRAPERS
+#  SCRAPERS  (unchanged from Railway)
 # ─────────────────────────────────────────
 
 HEADERS = {
@@ -68,8 +122,10 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+
 def make_id(*parts):
     return hashlib.md5("".join(parts).encode()).hexdigest()
+
 
 def scrape_linkedin(keyword, location="India"):
     jobs = []
@@ -88,25 +144,31 @@ def scrape_linkedin(keyword, location="India"):
                 c = card.find("h4", class_="base-search-card__subtitle")
                 l = card.find("span", class_="job-search-card__location")
                 a = card.find("a", class_="base-card__full-link")
-                if not t or not a: continue
+                if not t or not a:
+                    continue
                 link = a["href"].split("?")[0]
-                jobs.append({"id": make_id(link), "title": t.get_text(strip=True),
+                jobs.append({
+                    "id": make_id(link),
+                    "title": t.get_text(strip=True),
                     "company": c.get_text(strip=True) if c else "Unknown",
                     "location": l.get_text(strip=True) if l else "",
-                    "portal": "LinkedIn", "url": link})
-            except: continue
+                    "portal": "LinkedIn", "url": link,
+                })
+            except:
+                continue
         print(f"  [LinkedIn] {len(jobs)} jobs for '{keyword}'")
     except Exception as e:
         print(f"  [LinkedIn] Error: {e}")
     return jobs
 
+
 def scrape_naukri(keyword, location="india"):
     jobs = []
     try:
-        slug_kw = keyword.lower().replace(" ", "-")
+        slug_kw  = keyword.lower().replace(" ", "-")
         slug_loc = location.lower().replace(" ", "-")
         url = f"https://www.naukri.com/{slug_kw}-jobs-in-{slug_loc}"
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r   = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         for card in (soup.find_all("article", class_="jobTuple") or
                      soup.find_all("div", {"class": lambda c: c and "jobTuple" in c}))[:10]:
@@ -114,19 +176,24 @@ def scrape_naukri(keyword, location="india"):
                 t = card.find("a", class_="title")
                 c = card.find("a", class_="subTitle")
                 l = card.find("li", class_="location")
-                if not t: continue
+                if not t:
+                    continue
                 link = t.get("href", "")
-                jobs.append({"id": make_id(t.get_text(strip=True),
-                    c.get_text(strip=True) if c else ""),
+                jobs.append({
+                    "id": make_id(t.get_text(strip=True),
+                                  c.get_text(strip=True) if c else ""),
                     "title": t.get_text(strip=True),
                     "company": c.get_text(strip=True) if c else "Unknown",
                     "location": l.get_text(strip=True) if l else "",
-                    "portal": "Naukri", "url": link})
-            except: continue
+                    "portal": "Naukri", "url": link,
+                })
+            except:
+                continue
         print(f"  [Naukri]   {len(jobs)} jobs for '{keyword}'")
     except Exception as e:
         print(f"  [Naukri] Error: {e}")
     return jobs
+
 
 def scrape_indeed(keyword, location="India"):
     jobs = []
@@ -143,18 +210,24 @@ def scrape_indeed(keyword, location="India"):
                 c = card.find("span", class_="companyName")
                 l = card.find("div", class_="companyLocation")
                 a = card.find("a", class_="jcs-JobTitle")
-                if not t: continue
-                href = a.get("href","") if a else ""
+                if not t:
+                    continue
+                href = a.get("href", "") if a else ""
                 link = f"https://in.indeed.com{href}" if href.startswith("/") else href
-                jobs.append({"id": make_id(link), "title": t.get_text(strip=True).replace("new","").strip(),
+                jobs.append({
+                    "id": make_id(link),
+                    "title": t.get_text(strip=True).replace("new", "").strip(),
                     "company": c.get_text(strip=True) if c else "Unknown",
                     "location": l.get_text(strip=True) if l else "",
-                    "portal": "Indeed", "url": link})
-            except: continue
+                    "portal": "Indeed", "url": link,
+                })
+            except:
+                continue
         print(f"  [Indeed]   {len(jobs)} jobs for '{keyword}'")
     except Exception as e:
         print(f"  [Indeed] Error: {e}")
     return jobs
+
 
 def scrape_foundit(keyword, location="india"):
     jobs = []
@@ -170,84 +243,37 @@ def scrape_foundit(keyword, location="india"):
                 t = card.find("h3")
                 c = card.find("span", class_="company-name")
                 a = card.find("a")
-                if not t: continue
-                href = a.get("href","") if a else ""
+                if not t:
+                    continue
+                href = a.get("href", "") if a else ""
                 link = f"https://www.foundit.in{href}" if href.startswith("/") else href
-                jobs.append({"id": make_id(t.get_text(strip=True),
-                    c.get_text(strip=True) if c else ""),
+                jobs.append({
+                    "id": make_id(t.get_text(strip=True),
+                                  c.get_text(strip=True) if c else ""),
                     "title": t.get_text(strip=True),
                     "company": c.get_text(strip=True) if c else "Unknown",
-                    "location": location, "portal": "Foundit", "url": link})
-            except: continue
+                    "location": location, "portal": "Foundit", "url": link,
+                })
+            except:
+                continue
         print(f"  [Foundit]  {len(jobs)} jobs for '{keyword}'")
     except Exception as e:
         print(f"  [Foundit] Error: {e}")
     return jobs
 
-# ─────────────────────────────────────────
-#  COVER LETTER (Ollama — Free & Local)
-# ─────────────────────────────────────────
-
-def generate_cover_letter(job):
-    """
-    Uses Ollama running locally on your machine to generate cover letters.
-    100% free — no API key needed.
-
-    Ollama must be running: https://ollama.com
-    Pull a model first: ollama pull llama3.2
-    """
-    profile = CONFIG.get("USER_PROFILE", {})
-    if not profile:
-        return None
-
-    ollama_url   = CONFIG.get("OLLAMA_URL", "http://localhost:11434")
-    ollama_model = CONFIG.get("OLLAMA_MODEL", "llama3.2")
-
-    prompt = f"""Write a compelling cover letter (120-150 words) for this job.
-
-Applicant: {profile.get('name', 'Applicant')}
-Target Role: {profile.get('target_role', '')}
-Skills: {', '.join(profile.get('skills', []))}
-Experience: {profile.get('experience_years', 0)} years
-
-Job Title: {job['title']}
-Company: {job['company']}
-Portal: {job['portal']}
-
-Rules:
-- Start with a strong hook — NOT "I am writing to apply"
-- Mention one specific skill relevant to this role
-- Show genuine interest in the company
-- End with a confident call to action
-- Sound human and natural, not robotic or generic
-
-Return ONLY the cover letter text. No subject line, no extra commentary."""
-
-    try:
-        resp = requests.post(
-            f"{ollama_url}/api/generate",
-            json={
-                "model":  ollama_model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.7, "num_predict": 400}
-            },
-            timeout=120   # local LLMs can be slow on first run
-        )
-        resp.raise_for_status()
-        text = resp.json().get("response", "").strip()
-        print(f"  [Ollama]  ✅ Cover letter generated ({len(text)} chars)")
-        return text if text else None
-    except requests.exceptions.ConnectionError:
-        print("  [Ollama]  ⚠️  Cannot connect — is Ollama running?")
-        print("            Start it with: ollama serve")
-        return None
-    except Exception as e:
-        print(f"  [Ollama]  ❌ Error: {e}")
-        return None
 
 # ─────────────────────────────────────────
-#  EMAIL NOTIFICATION
+#  EMAIL  (Gmail SMTP only — no Brevo)
+# ─────────────────────────────────────────
+# AWS Lambda does NOT block outbound SMTP, so Gmail SMTP works directly.
+# You need a Gmail App Password (NOT your normal Gmail password).
+#
+# How to create a Gmail App Password:
+#   1. Go to myaccount.google.com → Security
+#   2. Enable 2-Step Verification (required)
+#   3. Search "App Passwords" → create one named "Job Monitor Bot"
+#   4. Copy the 16-character password
+#   5. Set it as EMAIL_PASS in Lambda Environment Variables
 # ─────────────────────────────────────────
 
 PORTAL_COLORS = {
@@ -257,25 +283,10 @@ PORTAL_COLORS = {
     "Foundit":  "#6C47FF",
 }
 
-def build_email_html(job, cover_letter=None):
-    """Build the HTML body for the job alert email."""
+
+def build_email_html(job):
+    """HTML body for a single job alert."""
     color = PORTAL_COLORS.get(job["portal"], "#6366f1")
-
-    cover_html = ""
-    if cover_letter:
-        cover_html = f"""
-        <div style="background:#f0f4ff;border-left:4px solid #6366f1;
-                    border-radius:8px;padding:16px 20px;margin-top:20px">
-          <p style="margin:0 0 8px;font-weight:700;color:#6366f1;font-size:14px">
-            📝 AI-Generated Cover Letter Draft
-          </p>
-          <p style="margin:0;color:#333;line-height:1.8;font-size:14px;
-                    white-space:pre-wrap">{cover_letter}</p>
-          <p style="margin:10px 0 0;font-size:11px;color:#999">
-            ✏️ Personalize this before sending!
-          </p>
-        </div>"""
-
     return f"""
     <!DOCTYPE html>
     <html>
@@ -297,7 +308,7 @@ def build_email_html(job, cover_letter=None):
               </tr>
               <tr>
                 <td style="padding:5px 0;color:#888;font-size:13px">📍 Location</td>
-                <td style="padding:5px 0;color:#333;font-size:14px">{job.get('location','India')}</td>
+                <td style="padding:5px 0;color:#333;font-size:14px">{job.get('location', 'India')}</td>
               </tr>
               <tr>
                 <td style="padding:5px 0;color:#888;font-size:13px">🌐 Portal</td>
@@ -309,7 +320,7 @@ def build_email_html(job, cover_letter=None):
               <tr>
                 <td style="padding:5px 0;color:#888;font-size:13px">⏰ Found at</td>
                 <td style="padding:5px 0;color:#333;font-size:14px">
-                  {datetime.now().strftime('%d %b %Y, %I:%M %p')}
+                  {datetime.now().strftime('%d %b %Y, %I:%M %p')} IST
                 </td>
               </tr>
             </table>
@@ -320,11 +331,10 @@ def build_email_html(job, cover_letter=None):
                     font-weight:700;font-size:16px;letter-spacing:0.3px">
             ⚡ Apply Now — Be Among the First!
           </a>
-          {cover_html}
         </div>
         <div style="background:#f9f9f9;padding:14px 28px;border-top:1px solid #eee">
           <p style="margin:0;color:#aaa;font-size:11px;text-align:center">
-            Sent by your Job Monitor Bot • Apply ASAP — early applicants get 3× more callbacks
+            Sent by your Job Monitor Bot · Apply ASAP — early applicants get 3× more callbacks
           </p>
         </div>
       </div>
@@ -332,124 +342,29 @@ def build_email_html(job, cover_letter=None):
     </html>"""
 
 
-def send_email_brevo(job, html, subject):
-    """Send via Brevo HTTP API — works on Railway (pure HTTPS, no SMTP port).
-
-    Gmail addresses cannot be used as Brevo senders due to Gmail's DMARC policy.
-    We use Brevo's own verified domain (no-reply@brevo-mail.io) as the sender,
-    while still delivering to your Gmail inbox (EMAIL_TO).
-    """
-    api_key = CONFIG.get("BREVO_API_KEY", "").strip()
-    to      = CONFIG.get("EMAIL_TO", "").strip()
-
-    if not api_key:
-        print("  [Brevo]  ⚠️  BREVO_API_KEY not set in Railway Variables")
-        return False
-    if not to:
-        print("  [Brevo]  ⚠️  EMAIL_TO not set")
-        return False
-
-    # Gmail/Yahoo/freemail domains are blocked by DMARC when used as Brevo sender.
-    # Use Brevo's own safe sender domain instead. You still RECEIVE at your Gmail.
-    # Use BREVO_SENDER from Railway env vars (set it to your Brevo account login email)
-    # That email is already verified by Brevo automatically on all accounts.
-    import os as _os
-    safe_sender_email = _os.environ.get("BREVO_SENDER", "").strip() or to
-    safe_sender_name  = "Job Monitor Bot"
-
-    try:
-        resp = requests.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key":      api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "sender":      {"name": safe_sender_name, "email": safe_sender_email},
-                "to":          [{"email": to}],
-                "subject":     subject,
-                "htmlContent": html,
-                "headers": {
-                    "X-Priority": "1",
-                    "X-MSMail-Priority": "High",
-                    "Importance": "High",
-                },
-                "tags": ["job-alert"],
-            },
-            timeout=15,
-        )
-        if resp.status_code in (200, 201):
-            return True
-        else:
-            print(f"  [Brevo]  ❌ HTTP {resp.status_code}: {resp.text[:200]}")
-            return False
-    except Exception as e:
-        print(f"  [Brevo]  ❌ Request error: {e}")
-        return False
-
-
-def send_email_smtp(job, html, subject):
+def send_email_smtp(subject, html):
     """
     Send via Gmail SMTP.
-    Tries port 587 (STARTTLS) first — Railway allows this.
-    Falls back to port 465 (SSL) for local use.
+    Tries port 587 (STARTTLS) first, then 465 (SSL) as fallback.
+    Both work fine on AWS Lambda — no port blocking.
     """
     user = CONFIG.get("EMAIL_USER", "").strip()
     pwd  = CONFIG.get("EMAIL_PASS", "").strip()
     to   = CONFIG.get("EMAIL_TO",   "").strip()
+
     if not user or not pwd or not to:
-        return False
+        print("  [Email] ❌ EMAIL_USER / EMAIL_PASS / EMAIL_TO not set in Lambda env vars")
+        return False, "missing_config"
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = f"Job Monitor Bot <{user}>"
-    msg["To"]      = to
-    msg.attach(MIMEText(html, "html"))
-
-    # Try port 587 (STARTTLS) — works on most cloud platforms
-    try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as s:
-            s.ehlo()
-            s.starttls()
-            s.ehlo()
-            s.login(user, pwd)
-            s.sendmail(user, to, msg.as_string())
-        return True
-    except Exception as e587:
-        print(f"  [SMTP]   ⚠️  Port 587 failed: {e587} — trying port 465")
-
-    # Fall back to port 465 (SSL) — works locally
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as s:
-            s.login(user, pwd)
-            s.sendmail(user, to, msg.as_string())
-        return True
-    except Exception as e465:
-        print(f"  [SMTP]   ❌ Port 465 also failed: {e465}")
-        return False
-
-
-def send_email_smtp_direct(subject, html):
-    """
-    Send directly via Gmail SMTP — no third-party service needed.
-    Tries port 587 (STARTTLS) first, then 465 (SSL).
-    Both work on Railway free tier.
-    """
-    user = CONFIG.get("EMAIL_USER", "").strip()
-    pwd  = CONFIG.get("EMAIL_PASS", "").strip()
-    to   = CONFIG.get("EMAIL_TO",   "").strip()
-    if not user or not pwd or not to:
-        return False, "EMAIL_USER/EMAIL_PASS/EMAIL_TO not configured"
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = f"Job Monitor Bot <{user}>"
-    msg["To"]      = to
+    msg["Subject"]    = subject
+    msg["From"]       = f"Job Monitor Bot <{user}>"
+    msg["To"]         = to
     msg["X-Priority"] = "1"
     msg["Importance"] = "High"
     msg.attach(MIMEText(html, "html"))
 
-    # Port 587 — STARTTLS (works on Railway)
+    # ── Port 587 STARTTLS (preferred) ──
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=25) as s:
             s.ehlo()
@@ -459,26 +374,26 @@ def send_email_smtp_direct(subject, html):
             s.sendmail(user, to, msg.as_string())
         return True, "587"
     except Exception as e587:
-        pass
+        print(f"  [Email] Port 587 failed: {e587} — trying 465")
 
-    # Port 465 — SSL (works locally)
+    # ── Port 465 SSL (fallback) ──
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=25) as s:
             s.login(user, pwd)
             s.sendmail(user, to, msg.as_string())
         return True, "465"
     except Exception as e465:
+        print(f"  [Email] Port 465 also failed: {e465}")
         return False, str(e465)
 
 
 def build_digest_email(new_jobs):
-    """Build one email containing all new jobs found in this scan."""
-    count  = len(new_jobs)
+    """Single email containing ALL new jobs found in this scan."""
+    count = len(new_jobs)
     portal_colors = {
         "LinkedIn": "#0A66C2", "Naukri": "#FF7555",
-        "Indeed": "#2164f3", "Foundit": "#6C47FF",
+        "Indeed": "#2164f3",   "Foundit": "#6C47FF",
     }
-
     cards = ""
     for job in new_jobs:
         color = portal_colors.get(job["portal"], "#6366f1")
@@ -489,7 +404,7 @@ def build_digest_email(new_jobs):
             <div>
               <h3 style="margin:0 0 4px;color:#1a1a2e;font-size:16px">{job['title']}</h3>
               <p style="margin:0;color:#555;font-size:14px">
-                🏭 {job['company']} &nbsp;·&nbsp; 📍 {job.get('location','India')}
+                🏭 {job['company']} &nbsp;·&nbsp; 📍 {job.get('location', 'India')}
               </p>
             </div>
             <span style="background:{color}20;color:{color};padding:3px 10px;
@@ -511,12 +426,12 @@ def build_digest_email(new_jobs):
                   border-radius:12px;overflow:hidden;
                   box-shadow:0 2px 12px rgba(0,0,0,0.08)">
         <div style="background:#6366f1;padding:24px 28px">
-          <p style="margin:0;color:rgba(255,255,255,0.8);font-size:13px">Job Monitor Bot</p>
+          <p style="margin:0;color:rgba(255,255,255,0.8);font-size:13px">Job Monitor Bot · AWS Lambda</p>
           <h1 style="margin:6px 0 0;color:#fff;font-size:22px">
             🚨 {count} New Job{'s' if count > 1 else ''} Found!
           </h1>
           <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px">
-            {datetime.now().strftime('%d %b %Y, %I:%M %p')}
+            {datetime.now().strftime('%d %b %Y, %I:%M %p')} IST
           </p>
         </div>
         <div style="padding:24px 28px">
@@ -532,17 +447,22 @@ def build_digest_email(new_jobs):
 
 
 # ─────────────────────────────────────────
-#  MAIN LOOP
+#  CORE SCAN LOGIC  (shared by handler)
 # ─────────────────────────────────────────
 
 def run_once():
+    """
+    Runs one full scrape cycle.
+    Called by lambda_handler on every EventBridge trigger.
+    Returns a summary dict so CloudWatch logs are structured.
+    """
     print(f"\n{'='*52}")
     print(f"  🔍 Scan at {datetime.now().strftime('%d %b %Y  %I:%M:%S %p')}")
     print(f"{'='*52}")
 
     keywords = CONFIG.get("KEYWORDS", ["developer"])
     location = CONFIG.get("LOCATION", "India")
-    portals  = CONFIG.get("PORTALS", ["linkedin","naukri","indeed","foundit"])
+    portals  = CONFIG.get("PORTALS", ["linkedin", "naukri", "indeed", "foundit"])
     all_jobs = []
 
     scraper_map = {
@@ -557,7 +477,7 @@ def run_once():
         for portal in portals:
             if portal in scraper_map:
                 all_jobs += scraper_map[portal](kw, location)
-                time.sleep(random.uniform(2, 4))
+                time.sleep(random.uniform(1, 2))   # shorter than Railway — stay under 15 min timeout
 
     # ── Company career portals ──
     all_jobs += scrape_companies(keywords)
@@ -572,49 +492,79 @@ def run_once():
 
     print(f"\n  ✅ {len(new_jobs)} new job(s) | {len(all_jobs)} total scanned")
 
-    # ── Send one email per new job ──
-    for job in new_jobs:
-        subject = f"⚡ New Job: {job['title']} at {job['company']} [{job['portal']}]"
-        html    = build_email_html(job)
-        label   = f"{job['title']} @ {job['company']}"
+    if not new_jobs:
+        return {"scanned": len(all_jobs), "new": 0, "email": "skipped"}
 
-        ok, detail = send_email_smtp_direct(subject, html)
-        if ok:
-            print(f"  [Email] ✅ Sent (SMTP port {detail}) → {label}")
-        elif CONFIG.get("BREVO_API_KEY", "").strip():
-            if send_email_brevo(job, html, subject):
-                print(f"  [Email] ✅ Sent (Brevo) → {label}")
-            else:
-                print(f"  [Email] ❌ Failed → {label}")
-        else:
-            print(f"  [Email] ❌ SMTP failed ({detail}) and no Brevo key set")
-        time.sleep(1)
+    # ── Send ONE digest email with all new jobs ──
+    # Instead of one email per job (which wastes quota), we batch everything
+    # into a single digest email per Lambda invocation.
+    subject = (
+        f"🚨 {len(new_jobs)} New Job{'s' if len(new_jobs) > 1 else ''}: "
+        f"{new_jobs[0]['title']} @ {new_jobs[0]['company']}"
+        + (f" + {len(new_jobs)-1} more" if len(new_jobs) > 1 else "")
+    )
+    html = build_digest_email(new_jobs)
+    ok, detail = send_email_smtp(subject, html)
 
-def main():
-    print("╔══════════════════════════════════════╗")
-    print("║   ⚡  Job Monitor Bot  —  Email Mode  ║")
-    print("╚══════════════════════════════════════╝")
+    if ok:
+        print(f"  [Email] ✅ Digest sent via SMTP port {detail} ({len(new_jobs)} jobs)")
+        return {"scanned": len(all_jobs), "new": len(new_jobs), "email": f"sent_port_{detail}"}
+    else:
+        print(f"  [Email] ❌ SMTP failed: {detail}")
+        return {"scanned": len(all_jobs), "new": len(new_jobs), "email": f"failed: {detail}"}
+
+
+# ─────────────────────────────────────────
+#  LAMBDA ENTRY POINT
+# ─────────────────────────────────────────
+# AWS calls this function every time EventBridge fires (every 20 min).
+# The `event` dict contains the EventBridge schedule event — we don't need it.
+# The `context` object has runtime metadata like remaining time — we don't need it either.
+#
+# Think of this as replacing your old:
+#   while True:
+#       run_once()
+#       time.sleep(20 * 60)
+#
+# EventBridge IS the sleep — it wakes Lambda up exactly when needed.
+# ─────────────────────────────────────────
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda entry point.
+    EventBridge triggers this every 20 minutes.
+    """
+    print("🚀 Lambda triggered by EventBridge")
     init_db()
 
-    mins = CONFIG.get("CHECK_INTERVAL_MINUTES", 20)
-    print(f"  Interval : every {mins} minutes")
-    print(f"  Keywords : {CONFIG.get('KEYWORDS', [])}")
-    print(f"  Location : {CONFIG.get('LOCATION', 'India')}")
-    print(f"  Email to : {CONFIG.get('EMAIL_TO', 'not set')}")
-    print()
+    try:
+        result = run_once()
+        return {
+            "statusCode": 200,
+            "body": result,
+        }
+    except Exception as e:
+        print(f"  ❌ Unhandled error in lambda_handler: {e}")
+        return {
+            "statusCode": 500,
+            "body": {"error": str(e)},
+        }
 
-    while True:
-        try:
-            run_once()
-        except KeyboardInterrupt:
-            print("\n👋 Bot stopped.")
-            break
-        except Exception as e:
-            print(f"  ❌ Error: {e}")
 
-        next_time = datetime.now().strftime("%I:%M %p")
-        print(f"\n  💤 Sleeping {mins} min... (press Ctrl+C to stop)")
-        time.sleep(mins * 60)
+# ─────────────────────────────────────────
+#  LOCAL TESTING  (run directly on your machine)
+# ─────────────────────────────────────────
+# You can still test this file locally before deploying:
+#   python job_monitor.py
+# It will call lambda_handler once and exit (no loop).
+# Set EMAIL_USER / EMAIL_PASS / EMAIL_TO as shell env vars first:
+#   export EMAIL_USER=you@gmail.com
+#   export EMAIL_PASS=yourapppassword
+#   export EMAIL_TO=you@gmail.com
 
 if __name__ == "__main__":
-    main()
+    print("╔══════════════════════════════════════════╗")
+    print("║  ⚡  Job Monitor Bot  —  Local Test Mode  ║")
+    print("╚══════════════════════════════════════════╝")
+    result = lambda_handler({}, None)
+    print(f"\n  Result: {result}")
