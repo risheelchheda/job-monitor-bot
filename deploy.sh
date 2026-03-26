@@ -10,7 +10,7 @@
 #    3. Lambda function already created in AWS Console (see README)
 # ──────────────────────────────────────────────────────────────
 
-FUNCTION_NAME="job-monitor-bot"   # ← must match the name you gave in AWS Console
+FUNCTION_NAME="JobMonitorBot"   # ← must match the name you gave in AWS Console
 REGION="ap-south-1"               # ← Mumbai (closest to India, lowest latency)
 
 echo "📦 Step 1: Installing dependencies into ./package/"
