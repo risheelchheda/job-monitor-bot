@@ -10,7 +10,7 @@ Changes in this version:
 
 import requests
 from bs4 import BeautifulSoup
-import sqlite3
+import boto3
 import time
 import hashlib
 import random
@@ -26,45 +26,40 @@ from company_scrapers import scrape_companies
 #  DATABASE  (/tmp — Lambda writable space)
 # ─────────────────────────────────────────
 
-DB_PATH = "/tmp/jobs.db"
 
+_dynamo = None
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS seen_jobs (
-            job_id   TEXT PRIMARY KEY,
-            title    TEXT,
-            company  TEXT,
-            location TEXT,
-            portal   TEXT,
-            url      TEXT,
-            found_at TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+def get_table():
+    global _dynamo
+    if _dynamo is None:
+        _dynamo = boto3.resource("dynamodb", region_name="ap-south-1") \
+                       .Table("job_monitor_seen_jobs")
+    return _dynamo
+
 
 
 def is_new_job(job_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM seen_jobs WHERE job_id = ?", (job_id,))
-    found = c.fetchone() is None
-    conn.close()
-    return found
+    try:
+        resp = get_table().get_item(Key={"job_id": job_id})
+        return "Item" not in resp
+    except Exception as e:
+        print(f"  [DynamoDB] get_item error: {e}")
+        return True
 
 
 def save_job(job):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT OR IGNORE INTO seen_jobs VALUES (?,?,?,?,?,?,?)",
-        (job["id"], job["title"], job["company"],
-         job.get("location", ""), job["portal"],
-         job["url"], datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
+    try:
+        get_table().put_item(Item={
+            "job_id":   job["id"],
+            "title":    job["title"],
+            "company":  job["company"],
+            "location": job.get("location", ""),
+            "portal":   job["portal"],
+            "url":      job["url"],
+            "found_at": datetime.now().isoformat(),
+        })
+    except Exception as e:
+        print(f"  [DynamoDB] put_item error: {e}")
 
 
 # ─────────────────────────────────────────
