@@ -23,7 +23,7 @@ CONFIG = {
         "Full Stack Developer",
     ],
 
-    "LOCATION": "India",
+    "LOCATION": ["Mumbai","Pune","Banglore"],
 
     "PORTALS": ["linkedin", "naukri", "indeed", "foundit"],
 
@@ -35,7 +35,7 @@ CONFIG = {
         "razorpay", "phonepe", "paytm", "cred", "groww",
         "zepto", "swiggy", "zomato", "meesho", "flipkart",
         "google", "microsoft", "amazon", "atlassian",
-        "adobe", "freshworks", "thoughtworks", "zoho",
+        "adobe", "freshworks", "thoughtworks", "zoho","Navi","Billdesk","Hsbc","Nium"
     ],
 
     # ─────────────────────────────────────
