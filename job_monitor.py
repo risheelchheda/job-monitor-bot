@@ -1,7 +1,7 @@
 """
 job_monitor.py  —  AWS Lambda version
 Changes in this version:
-  1. Individual email per job (not a digest)
+  1. Consolidated digest email (not individual per job)
   2. Naukri  — switched to their internal JSON API (no JS rendering needed)
   3. Indeed  — switched to their internal JSON API
   4. Foundit — switched to their search JSON API
@@ -244,7 +244,6 @@ def scrape_indeed(keyword, location="India"):
                     try:
                         raw = script.string
                         start = raw.index("jobKeysWithInfo") + len("jobKeysWithInfo") + 2
-                        # parse embedded job data
                         pass
                     except:
                         pass
@@ -336,7 +335,7 @@ def scrape_foundit(keyword, location="India"):
 
 
 # ─────────────────────────────────────────
-#  EMAIL — one individual email per job
+#  EMAIL — one consolidated digest email
 # ─────────────────────────────────────────
 
 PORTAL_COLORS = {
@@ -346,67 +345,105 @@ PORTAL_COLORS = {
     "Foundit":   "#6C47FF",
 }
 
+PORTAL_DEFAULT_COLOR = "#6366f1"
 
-def build_email_html(job):
-    """Builds a rich HTML email for a single job posting."""
-    color = PORTAL_COLORS.get(job["portal"], "#6366f1")
+
+def build_job_row(job):
+    """Builds a single job card row for the digest email."""
+    color = PORTAL_COLORS.get(job["portal"], PORTAL_DEFAULT_COLOR)
+    return f"""
+    <tr>
+      <td style="padding:14px 0;border-bottom:1px solid #f0f0f0">
+        <table style="border-collapse:collapse;width:100%">
+          <tr>
+            <td style="width:100%">
+              <a href="{job['url']}"
+                 style="font-size:15px;font-weight:700;color:#1a1a2e;text-decoration:none">
+                {job['title']}
+              </a>
+              <div style="margin-top:4px">
+                <span style="color:#555;font-size:13px">🏭 {job['company']}</span>
+                &nbsp;&nbsp;
+                <span style="color:#888;font-size:12px">📍 {job.get('location', 'India')}</span>
+              </div>
+            </td>
+            <td style="text-align:right;vertical-align:top;white-space:nowrap;padding-left:12px">
+              <span style="background:{color}20;color:{color};padding:3px 10px;
+                           border-radius:20px;font-size:11px;font-weight:700">
+                {job['portal']}
+              </span>
+              <div style="margin-top:6px">
+                <a href="{job['url']}"
+                   style="background:{color};color:#fff;padding:5px 12px;
+                          border-radius:6px;font-size:12px;font-weight:700;
+                          text-decoration:none;display:inline-block">
+                  Apply →
+                </a>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>"""
+
+
+def build_digest_email_html(new_jobs):
+    """Builds a single consolidated digest HTML email for all new jobs."""
+    scan_time = datetime.now().strftime('%d %b %Y, %I:%M %p')
+    total     = len(new_jobs)
+
+    # Group jobs by portal for the summary bar
+    portal_counts = {}
+    for job in new_jobs:
+        portal_counts[job["portal"]] = portal_counts.get(job["portal"], 0) + 1
+
+    summary_pills = "".join([
+        f'<span style="background:{PORTAL_COLORS.get(p, PORTAL_DEFAULT_COLOR)}20;'
+        f'color:{PORTAL_COLORS.get(p, PORTAL_DEFAULT_COLOR)};'
+        f'padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;margin-right:6px">'
+        f'{p} ({c})</span>'
+        for p, c in portal_counts.items()
+    ])
+
+    job_rows = "".join([build_job_row(job) for job in new_jobs])
+
     return f"""<!DOCTYPE html>
 <html>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
-  <div style="max-width:580px;margin:30px auto;background:#fff;
+  <div style="max-width:640px;margin:30px auto;background:#fff;
               border-radius:12px;overflow:hidden;
               box-shadow:0 2px 12px rgba(0,0,0,0.08)">
 
     <!-- Header -->
-    <div style="background:{color};padding:24px 28px">
-      <p style="margin:0;color:rgba(255,255,255,0.8);font-size:13px">Job Monitor Bot</p>
-      <h1 style="margin:4px 0 0;color:#fff;font-size:22px">🚨 New Job Alert!</h1>
+    <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:28px 32px">
+      <p style="margin:0;color:rgba(255,255,255,0.6);font-size:13px">Job Monitor Bot</p>
+      <h1 style="margin:6px 0 0;color:#fff;font-size:24px">
+        🚨 {total} New Job{'s' if total != 1 else ''} Found!
+      </h1>
+      <p style="margin:8px 0 0;color:rgba(255,255,255,0.7);font-size:13px">
+        ⏰ Scanned at {scan_time} IST
+      </p>
     </div>
 
-    <!-- Job details -->
-    <div style="padding:24px 28px">
-      <div style="background:#fafafa;border:1px solid #eee;border-radius:10px;padding:20px">
-        <h2 style="margin:0 0 16px;color:#1a1a2e;font-size:20px">{job['title']}</h2>
-        <table style="border-collapse:collapse;width:100%">
-          <tr>
-            <td style="padding:6px 0;color:#888;font-size:13px;width:90px">🏭 Company</td>
-            <td style="padding:6px 0;color:#333;font-size:14px;font-weight:600">{job['company']}</td>
-          </tr>
-          <tr>
-            <td style="padding:6px 0;color:#888;font-size:13px">📍 Location</td>
-            <td style="padding:6px 0;color:#333;font-size:14px">{job.get('location', 'India')}</td>
-          </tr>
-          <tr>
-            <td style="padding:6px 0;color:#888;font-size:13px">🌐 Source</td>
-            <td style="padding:6px 0">
-              <span style="background:{color}20;color:{color};padding:2px 10px;
-                           border-radius:20px;font-size:12px;font-weight:700">{job['portal']}</span>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:6px 0;color:#888;font-size:13px">⏰ Found</td>
-            <td style="padding:6px 0;color:#333;font-size:14px">
-              {datetime.now().strftime('%d %b %Y, %I:%M %p')} IST
-            </td>
-          </tr>
-        </table>
-      </div>
+    <!-- Portal summary pills -->
+    <div style="padding:16px 32px;background:#fafafa;border-bottom:1px solid #eee">
+      {summary_pills}
+    </div>
 
-      <!-- CTA button -->
-      <a href="{job['url']}"
-         style="display:block;text-align:center;margin:20px 0 0;padding:14px;
-                background:{color};color:#fff;text-decoration:none;border-radius:8px;
-                font-weight:700;font-size:16px;letter-spacing:0.3px">
-        ⚡ Apply Now — Be Among the First!
-      </a>
+    <!-- Job list -->
+    <div style="padding:8px 32px 24px">
+      <table style="border-collapse:collapse;width:100%">
+        {job_rows}
+      </table>
     </div>
 
     <!-- Footer -->
-    <div style="background:#f9f9f9;padding:14px 28px;border-top:1px solid #eee">
+    <div style="background:#f9f9f9;padding:16px 32px;border-top:1px solid #eee">
       <p style="margin:0;color:#aaa;font-size:11px;text-align:center">
         Job Monitor Bot · Apply ASAP — early applicants get 3× more callbacks
       </p>
     </div>
+
   </div>
 </body>
 </html>"""
@@ -464,10 +501,12 @@ def run_once():
     print(f"  🔍 Scan at {datetime.now().strftime('%d %b %Y  %I:%M:%S %p')}")
     print(f"{'='*52}")
 
-    keywords = CONFIG.get("KEYWORDS", ["developer"])
-    location = CONFIG.get("LOCATION", "India")
-    portals  = CONFIG.get("PORTALS", ["linkedin", "naukri", "indeed", "foundit"])
-    all_jobs = []
+    keywords  = CONFIG.get("KEYWORDS", ["developer"])
+    location  = CONFIG.get("LOCATION", "India")
+    # Support both a single string and a list of locations
+    locations = location if isinstance(location, list) else [location]
+    portals   = CONFIG.get("PORTALS", ["linkedin", "naukri", "indeed", "foundit"])
+    all_jobs  = []
 
     scraper_map = {
         "linkedin": scrape_linkedin,
@@ -478,10 +517,12 @@ def run_once():
 
     for kw in keywords:
         print(f"\n📌 '{kw}'")
-        for portal in portals:
-            if portal in scraper_map:
-                all_jobs += scraper_map[portal](kw, location)
-                time.sleep(random.uniform(1, 2))
+        for loc in locations:
+            print(f"  📍 Location: {loc}")
+            for portal in portals:
+                if portal in scraper_map:
+                    all_jobs += scraper_map[portal](kw, loc)
+                    time.sleep(random.uniform(1, 2))
 
     # Company career portals
     all_jobs += scrape_companies(keywords)
@@ -507,24 +548,17 @@ def run_once():
     if not new_jobs:
         return {"scanned": len(all_jobs), "new": 0, "emails_sent": 0}
 
-    # ── Send ONE individual email per new job ──────────────────────────
-    # Each job gets its own email so your inbox shows individual alerts.
-    # You can see at a glance: "Backend Engineer @ Razorpay" without
-    # opening a digest. Easier to act on / archive per job.
-    emails_sent = 0
-    for job in new_jobs:
-        subject = f"⚡ {job['title']} @ {job['company']} [{job['portal']}]"
-        html    = build_email_html(job)
-        label   = f"{job['title']} @ {job['company']}"
+    # ── Send ONE consolidated digest email for all new jobs ────────────
+    subject = f"🚨 {len(new_jobs)} New Job{'s' if len(new_jobs) != 1 else ''} Found — {datetime.now().strftime('%d %b %Y, %I:%M %p')} IST"
+    html    = build_digest_email_html(new_jobs)
 
-        ok, detail = send_email_smtp(subject, html)
-        if ok:
-            print(f"  [Email] ✅ Sent (port {detail}) → {label}")
-            emails_sent += 1
-        else:
-            print(f"  [Email] ❌ Failed ({detail}) → {label}")
-
-        time.sleep(1)   # small gap between emails to avoid Gmail rate limiting
+    ok, detail = send_email_smtp(subject, html)
+    if ok:
+        print(f"  [Email] ✅ Digest sent (port {detail}) → {len(new_jobs)} jobs")
+        emails_sent = 1
+    else:
+        print(f"  [Email] ❌ Failed ({detail})")
+        emails_sent = 0
 
     return {"scanned": len(all_jobs), "new": len(new_jobs), "emails_sent": emails_sent}
 
