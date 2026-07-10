@@ -35,7 +35,7 @@ CONFIG = {
         "razorpay", "phonepe", "paytm", "cred", "groww",
         "zepto", "swiggy", "zomato", "meesho", "flipkart",
         "google", "microsoft", "amazon", "atlassian",
-        "adobe", "freshworks", "thoughtworks", "zoho","Navi","Billdesk","Hsbc","Nium"
+        "adobe", "freshworks", "thoughtworks", "zoho","Navi","Billdesk","Hsbc","Nium","jpmorgan","morganstanley","nielsen"
     ],
 
     # ─────────────────────────────────────

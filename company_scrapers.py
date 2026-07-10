@@ -30,29 +30,49 @@ HEADERS = {
 #  Used for company-filtered LinkedIn search (f_C param)
 #  These are the numeric IDs from linkedin.com/company/<slug>
 # ─────────────────────────────────────────────────────────────────────
+# Multiple IDs per company — covers all LinkedIn entities (subsidiaries, regional).
+# IDs sourced directly from f_C= param in LinkedIn job search URLs.
+# To update: go to linkedin.com/company/<slug> → "See all jobs" → copy f_C= from URL.
 LINKEDIN_COMPANY_IDS = {
-    "razorpay":     "2547326",
-    "phonepe":      "11172953",
-    "paytm":        "1652587",
-    "cred":         "19130078",
-    "groww":        "9213783",
-    "zepto":        "71918462",
-    "swiggy":       "3354693",
-    "zomato":       "3044872",
-    "meesho":       "10634770",
-    "flipkart":     "2382148",
-    "google":       "1441",
-    "microsoft":    "1035",
-    "amazon":       "1586",
-    "atlassian":    "4303",
-    "adobe":        "1441",
-    "freshworks":   "3321009",
-    "thoughtworks": "1624",
-    "zoho":         "1357581",
-    "navi":         "17869903",
-    "billdesk":     "731467",
-    "hsbc":         "2763",
-    "nium":         "10876082",
+    "razorpay":      ["3788927", "13616753", "2770855"],
+    "phonepe":       ["10479149"],
+    "paytm":         ["2340144"],
+    "cred":          ["19130078"],   # no URL provided, keeping old
+    "groww":         ["10813156"],
+    "zepto":         ["71918462"],   # no f_C in URL, keeping old
+    "swiggy":        ["9252341", "10286017"],
+    "zomato":        ["3044872"],    # no URL provided, keeping old
+    "meesho":        ["10037698"],
+    "flipkart":      ["321062"],
+    "google":        ["1441"],       # no f_C in URL, keeping old
+    "microsoft":     ["1035", "1418841", "165397", "1386954", "3763403", "3290211",
+                      "10073178", "3238203", "2270931", "3641570", "263515", "1148098",
+                      "5097047", "589037", "3178875", "692068", "18086638", "19537",
+                      "19053704", "1889423", "30203", "5607466", "11206713", "2446424"],
+    "amazon":        ["1586", "2382910", "12227", "167364", "34924", "1379932",
+                      "2320329", "47157", "80073065", "49318", "61712", "21433",
+                      "15218805", "208137", "111446", "16551", "46825", "860467",
+                      "71099", "2649984", "4787585", "11091426", "17411"],
+    "atlassian":     ["4303"],       # no URL provided, keeping old
+    "adobe":         ["1480", "5273045"],
+    "freshworks":    ["1377014"],
+    "thoughtworks":  ["157356"],
+    "zoho":          ["38373", "77124395", "47592779", "72460712", "72038238",
+                      "14492182", "54306048", "31279043", "13710315", "67536694", "31041595"],
+    "navi":          ["40662386"],
+    "billdesk":      ["731467"],     # no URL provided, keeping old
+    "hsbc":          ["1241", "93338773"],
+    "nium":          ["10876082"],   # no f_C in URL, keeping old
+    "jpmorgan":      ["1067", "18965103"],
+    "jpmorganchase": ["1068", "10117963", "79730774", "80739237", "105239680", "7792920"],
+    "morganstanley": ["497017"],
+    "nielsen":       ["1714", "30298", "416820", "24651", "71383", "376990",
+                      "1056182", "88859", "35192", "162325", "7788", "18667",
+                      "5067278", "275404", "366930", "78209"],
+    "nielseniq":     ["69088863", "1364767", "1718", "3126409", "18360338", "419609"],
+    "nielson":       ["1714", "30298", "416820", "24651", "71383", "376990",
+                      "1056182", "88859", "35192", "162325", "7788", "18667",
+                      "5067278", "275404", "366930", "78209"],
 }
 
 
@@ -118,25 +138,39 @@ def safe_greenhouse(url):
 
 def scrape_linkedin_company(company_name, company_key, keywords, location="India"):
     """
-    Search LinkedIn jobs filtered by company ID.
-    Uses the f_C (company filter) param on LinkedIn's public job search.
+    Search LinkedIn jobs filtered by company ID(s) + India geoId.
+    Supports multiple IDs per company — merges results from all entities.
+    geoId=102713980 = India — prevents US/global results appearing.
+
+    To add/update IDs: go to linkedin.com/company/<slug> → "See all jobs"
+    → copy the f_C= value from the URL and update LINKEDIN_COMPANY_IDS above.
     """
-    jobs = []
-    company_id = LINKEDIN_COMPANY_IDS.get(company_key.lower())
-    if not company_id:
+    jobs     = []
+    seen_ids = set()
+
+    ids = LINKEDIN_COMPANY_IDS.get(company_key.lower(), [])
+    if not ids:
         return jobs
+
+    # Ensure it's always a list (handles legacy single-string values)
+    if isinstance(ids, str):
+        ids = [ids]
+
+    # Batch all IDs into one request using comma-separated f_C values
+    # LinkedIn supports up to ~10 IDs in one f_C param
+    f_c_param = "%2C".join(ids)
 
     try:
         url = (
             f"https://www.linkedin.com/jobs/search?"
-            f"f_C={company_id}"
-            f"&location={requests.utils.quote(location)}"
-            f"&f_TPR=r86400"   # last 24 hours
+            f"f_C={f_c_param}"
+            f"&geoId=102713980"   # India geoId — filters to India only
+            f"&f_TPR=r86400"      # last 24 hours
             f"&sortBy=DD"
         )
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
-        for card in soup.find_all("div", class_="base-card")[:20]:
+        for card in soup.find_all("div", class_="base-card")[:25]:
             try:
                 t = card.find("h3", class_="base-search-card__title")
                 c = card.find("h4", class_="base-search-card__subtitle")
@@ -148,8 +182,12 @@ def scrape_linkedin_company(company_name, company_key, keywords, location="India
                 if not keyword_matches(title, keywords):
                     continue
                 link = a["href"].split("?")[0]
+                uid  = make_id("li_company", company_key, link)
+                if uid in seen_ids:
+                    continue
+                seen_ids.add(uid)
                 jobs.append({
-                    "id":       make_id("li_company", company_key, link),
+                    "id":       uid,
                     "title":    title,
                     "company":  company_name,
                     "location": l.get_text(strip=True) if l else location,
@@ -804,6 +842,116 @@ def scrape_nium(keywords):
     return jobs
 
 
+def scrape_jpmorgan(keywords):
+    jobs = []
+    # JP Morgan uses their own careers site
+    try:
+        r = requests.get(
+            "https://jpmc.fa.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions",
+            params={
+                "onlyData": "true",
+                "finder": "findReqs",
+                "q": f"POSTING_DATES>=SYSDATE-1",
+                "fields": "Title,PrimaryLocation,ExternalDescriptionStr,RequisitionNumber",
+                "limit": 20,
+            },
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            for job in r.json().get("items", []):
+                title = job.get("Title", "")
+                if not keyword_matches(title, keywords):
+                    continue
+                loc = job.get("PrimaryLocation", "India")
+                if not any(x in loc.lower() for x in ["india", "mumbai", "bangalore", "hyderabad", "pune"]):
+                    continue
+                req_id = job.get("RequisitionNumber", "")
+                link = f"https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/{req_id}" if req_id else "https://careers.jpmorgan.com"
+                jobs.append({"id": make_id("jpmorgan", req_id or title),
+                    "title": title, "company": "JP Morgan Chase",
+                    "location": loc, "portal": "JP Morgan Careers", "url": link})
+    except Exception:
+        pass
+
+    # Fallback to LinkedIn
+    if not jobs:
+        jobs = scrape_linkedin_company("JP Morgan Chase", "jpmorgan", keywords)
+
+    print(f"  [JP Morgan]   {len(jobs)} matching jobs")
+    return jobs
+
+
+def scrape_morganstanley(keywords):
+    jobs = []
+    # Morgan Stanley careers API
+    try:
+        r = requests.get(
+            "https://ms.taleo.net/careersection/2/jobsearch.ftl",
+            params={"lang": "en&location=India", "keyword": keywords[0]},
+            headers=HEADERS, timeout=15,
+        )
+        soup = BeautifulSoup(r.text, "html.parser")
+        for row in soup.find_all("tr", class_="even") + soup.find_all("tr", class_="odd"):
+            a = row.find("a", href=True)
+            if not a:
+                continue
+            title = a.get_text(strip=True)
+            if not keyword_matches(title, keywords):
+                continue
+            href = a["href"]
+            link = href if href.startswith("http") else f"https://ms.taleo.net{href}"
+            jobs.append({"id": make_id("morganstanley", title),
+                "title": title, "company": "Morgan Stanley",
+                "location": "India", "portal": "Morgan Stanley Careers", "url": link})
+    except Exception:
+        pass
+
+    # Fallback to LinkedIn
+    if not jobs:
+        jobs = scrape_linkedin_company("Morgan Stanley", "morganstanley", keywords)
+
+    print(f"  [Morgan Stanley] {len(jobs)} matching jobs")
+    return jobs
+
+
+def scrape_nielsen(keywords):
+    jobs = []
+    # Nielsen uses Workday
+    try:
+        r = requests.post(
+            "https://nielsen.wd1.myworkdayjobs.com/wday/cxs/nielsen/Nielsen_External_Career_Site/jobs",
+            json={
+                "appliedFacets": {"locations": ["India"]},
+                "limit": 20,
+                "offset": 0,
+                "searchText": keywords[0],
+            },
+            headers={**HEADERS, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            for job in r.json().get("jobPostings", []):
+                title = job.get("title", "")
+                if not keyword_matches(title, keywords):
+                    continue
+                loc = job.get("locationsText", "India")
+                slug = job.get("externalPath", "")
+                link = f"https://nielsen.wd1.myworkdayjobs.com/Nielsen_External_Career_Site{slug}" if slug else "https://nielsen.wd1.myworkdayjobs.com/Nielsen_External_Career_Site"
+                jobs.append({"id": make_id("nielsen", title + loc),
+                    "title": title, "company": "Nielsen",
+                    "location": loc, "portal": "Nielsen Careers", "url": link})
+    except Exception:
+        pass
+
+    # Fallback to LinkedIn
+    if not jobs:
+        jobs = scrape_linkedin_company("Nielsen", "nielsen", keywords)
+
+    print(f"  [Nielsen]     {len(jobs)} matching jobs")
+    return jobs
+
+
 # ─────────────────────────────────────────────────────────────────────
 #  REGISTRY
 # ─────────────────────────────────────────────────────────────────────
@@ -832,6 +980,13 @@ COMPANY_SCRAPERS = {
     "billdesk":     scrape_billdesk,
     "hsbc":         scrape_hsbc,
     "nium":         scrape_nium,
+    "jpmorgan":     scrape_jpmorgan,
+    "jpmorganchase": scrape_jpmorgan,
+    "morgan stanley": scrape_morganstanley,
+    "morganstanley": scrape_morganstanley,
+    "nielsen":      scrape_nielsen,
+    "nielson":      scrape_nielsen,
+    "nielseniq":    scrape_nielsen,
 }
 
 
